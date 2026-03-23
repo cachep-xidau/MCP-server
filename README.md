@@ -18,59 +18,90 @@ When an AI Agent (Gemini in Antigravity, local Codex CLI, etc.) requires context
 The diagram below illustrates the complete execution environment, the background synchronization mechanism for the Knowledge Base, and the external API connections.
 
 ```mermaid
-flowchart TD
-    classDef hub fill:#2d3436,stroke:#74b9ff,stroke-width:2px,color:#dfe6e9;
-    classDef local fill:#0984e3,stroke:#74b9ff,stroke-width:2px,color:#fff;
-    classDef server fill:#d63031,stroke:#fab1a0,stroke-width:2px,color:#fff;
-    classDef db fill:#e17055,stroke:#ffeaa7,stroke-width:2px,color:#fff;
-    classDef external fill:#00b894,stroke:#55efc4,stroke-width:2px,color:#fff;
+C4Context
+    title DON Workspace MCP - Runtime Component Topology
 
-    subgraph Internal_Network["👨‍💻 Employee Workspace (Local Machine)"]
-        direction TB
-        Agent["🤖 AI Agent\n(Gemini 3.1 / Codex 5.4)"]:::local
+    Person(agent, "AI Agent", "Gemini / Claude / Codex\n(Host IDE Process)")
+    
+    System_Boundary(mcp_process, "MCP Node.js Process (Spawned via stdio)") {
+        Component(core_router, "Core Router", "Protocol Handler", "Parses JSON-RPC over stdio")
         
-        subgraph MCP_Architecture["DON MCP Server (Node.js / Python)"]
-            Router["🔌 MCP Core Router\n(Stdio Protocol)"]:::hub
-            T_Search["🔍 Company KB\n(FTS5 RAG Tool)"]:::hub
-            T_Figma["🎨 Figma MCP\n(Automation & Extract)"]:::hub
-            T_Jira["🎫 Jira MCP\n(Read/Write Tickets)"]:::hub
-            T_Conf["📘 Confluence MCP\n(Scrape Docs)"]:::hub
+        Boundary(resilience_layer, "Resilience & State Layer") {
+            Component(circuit_breaker, "Circuit Breaker", "Opossum", "Prevents cascading upstream failures")
+            Component(rate_limiter, "Rate Limiter", "Token Bucket", "Controls API throughput")
+            Component(cache_mgr, "Cache Manager", "L1 Mem + L2 SQLite", "stale-if-error & offline fallback")
+        }
+        
+        Boundary(tools_layer, "Integration Hubs") {
+            Component(t_search, "FTS5 Search", "RAG Tool", "Queries local DB")
+            Component(t_figma, "Figma Gateway", "REST Wrapper", "Extracts design tokens")
+            Component(t_jira, "Jira Gateway", "REST Wrapper", "Syncs Epics/Stories")
+        }
+    }
+
+    SystemDb(local_db, "Local RAG DB", "SQLite WAL", "High-speed read replica")
+    System_Ext(don_server, "DON Architecture Server", "Master Knowledge Base")
+    System_Ext(external_apis, "External APIs", "Figma / Jira / Confluence")
+
+    Rel(agent, core_router, "Spawns & Queries", "stdio / JSON-RPC")
+    Rel(core_router, circuit_breaker, "Routes Request")
+    Rel(circuit_breaker, rate_limiter, "Validates")
+    Rel(rate_limiter, cache_mgr, "Checks Cache")
+    
+    Rel(cache_mgr, tools_layer, "Cache Miss (Fetch)")
+    Rel(t_search, local_db, "Reads (0ms latency)", "SQL MATCH")
+    Rel(tools_layer, external_apis, "HTTPS / REST")
+    
+    Rel(don_server, local_db, "Background CRON Sync", "SSH/HTTP")
+```
+
+### 2.1. Request Lifecycle Sequence
+
+This sequence diagram illustrates how a tool execution request flows through the internal resilience and caching layers, demonstrating the aggressive offline fallback strategy.
+
+```mermaid
+sequenceDiagram
+    participant AGY as AI Agent (IDE)
+    participant Core as MCP Core (stdio)
+    participant Cache as L1/L2 Cache
+    participant Res as Resilience (Breaker/Limiter)
+    participant Tool as Tool (Figma/Jira)
+    participant Ext as External API
+    
+    AGY->>Core: Connects via stdio
+    AGY->>Core: CallTool(name, args)
+    
+    Core->>Cache: Check Response Cache (Stale-if-error)
+    alt Cache HIT (Valid)
+        Cache-->>Core: Return Cached Data
+    else Cache MISS or STALE
+        Cache->>Res: Forward Request
+        
+        Res->>Res: Check Rate Limits
+        Res->>Res: Check Breaker Status (Open/Closed)
+        
+        alt Breaker OPEN
+            Res-->>Cache: Reject (Fast Fail)
+            Cache-->>Core: Fallback to Stale Data
+        else Breaker CLOSED
+            Res->>Tool: Execute Fetch
+            Tool->>Ext: HTTPS Request
             
-            Router --> T_Search
-            Router --> T_Figma
-            Router --> T_Jira
-            Router --> T_Conf
+            alt Network Success
+                Ext-->>Tool: 200 OK Response
+                Tool-->>Cache: Save to L1/L2 (Normalize)
+                Cache-->>Core: Return Fresh Data
+            else Network Failure / Timeout
+                Ext--xTool: 5xx / Timeout
+                Tool->>Res: Record Failure
+                Res->>Res: Trip Breaker (if threshold met)
+                Tool-->>Cache: Retry Exhausted
+                Cache-->>Core: Fallback to Stale Data (stale-if-error)
+            end
         end
-
-        DB_Local[("💽 Local RAG DB\n(remote-rag.db)")]:::db
-        CronJob(("🔄 Background\nSync Daemon")):::local
-
-        %% Agent triggers local MCP
-        Agent == "Spawn & Query\n(stdio)" === Router
-        T_Search -- "SQL MATCH\n(BM25)" --> DB_Local
-        
-        %% Local Sync Logic
-        CronJob -. "Overwrites/Merges" .-> DB_Local
     end
-
-    subgraph Cloud_Server["☁️ DON Architecture Server"]
-        DB_Master[("💽 Master remote-rag.db\n(Single Source of Truth)")]:::server
-        API_Gateway["🌐 Sync API Gateway"]:::server
-        
-        API_Gateway --> DB_Master
-    end
-
-    subgraph Third_Party["🌍 External Platforms"]
-        S_Figma["Figma Server"]:::external
-        S_Jira["Atlassian Jira"]:::external
-        S_Conf["Atlassian Confluence"]:::external
-    end
-
-    %% Cross-boundary connections
-    CronJob == "Polls every X mins\n(HTTP/SSH)" === API_Gateway
-    T_Figma -- "REST / Auth" --> S_Figma
-    T_Jira -- "REST / Auth" --> S_Jira
-    T_Conf -- "REST / Auth" --> S_Conf
+    
+    Core-->>AGY: ToolResult JSON
 ```
 
 ---
