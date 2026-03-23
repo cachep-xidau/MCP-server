@@ -1,6 +1,10 @@
+import "dotenv/config";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { setupSearchTool } from "./tools/search_kb.js";
+import { setupFigmaTool } from "./tools/figma.js";
+import { setupJiraTool } from "./tools/jira.js";
+import { setupConfluenceTool } from "./tools/confluence.js";
 
 // Initialize the DON Workspace MCP Server
 const server = new McpServer({
@@ -12,10 +16,10 @@ const server = new McpServer({
 // Core RAG capability referencing the local SQLite background synced DB
 setupSearchTool(server);
 
-// TODO: Abstract external connectors (Figma, Jira, Confluence)
-// setupFigmaTool(server);
-// setupJiraTool(server);
-// setupConfluenceTool(server);
+// Setup External REST Hub connectors
+setupFigmaTool(server);
+setupJiraTool(server);
+setupConfluenceTool(server);
 
 async function main() {
   const transport = new StdioServerTransport();

@@ -33,10 +33,11 @@ export function setupSearchTool(server: McpServer) {
         // Uses snippet() to drastically cut down on token usage for the LLM
         let sql = `
           SELECT 
-            title, 
+            p.title, 
             snippet(pages_fts, -1, '[MATCH]', '[/MATCH]', '...', 64) as context,
-            url
-          FROM pages_fts 
+            p.url
+          FROM pages_fts f
+          JOIN pages p ON f.rowid = p.id
           WHERE pages_fts MATCH ?
         `;
 
