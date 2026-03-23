@@ -50,7 +50,38 @@ flowchart TD
     ToolsLayer -- "Direct fetch()\n(No Cache / No Retry)" --> ExtAPIs
 ```
 
-### 2.2. Desired Enterprise Architecture (Target State)
+### 2.2. Request Lifecycle Sequence (MVP Reality)
+
+This simple sequence diagram shows the reality of the current barebones implementation: direct API calls without caching, retry logic, or failure mitigation.
+
+```mermaid
+sequenceDiagram
+    participant AGY as AI Agent (IDE)
+    participant schema as Zod Schema Engine
+    participant Core as MCP Core (stdio)
+    participant Tool as Tool (Figma/Jira/Search)
+    participant Ext as External API / SQLite
+    
+    AGY->>schema: Prompt: "Fetch Figma file X"
+    schema->>schema: Parse Tool Description
+    schema->>Core: Connects via stdio
+    schema->>Core: CallTool(name, args)
+    
+    Core->>Tool: Execute Protocol Route
+    Tool->>Ext: Direct HTTPS Request / DB Query
+    
+    alt Network Success
+        Ext-->>Tool: 200 OK / Data
+        Tool-->>Core: JSON Response
+    else Network Failure / Timeout
+        Ext--xTool: 5xx / Timeout / Throttle
+        Tool-->>Core: Error string (Fatal, No Retry)
+    end
+    
+    Core-->>AGY: ToolResult
+```
+
+### 2.3. Desired Enterprise Architecture (Target State)
 
 This diagram outlines the **planned future state** of the system. It introduces a comprehensive `Resilience & State Layer` (Circuit Breakers, Token Bucket limiters, and Local caching) designed to prevent cascading failures and API throttling.
 
@@ -97,7 +128,7 @@ flowchart TD
     MasterDB -. "Background CRON Sync" .-> LocalDB
 ```
 
-### 2.3. Request Lifecycle Sequence (Planned)
+### 2.4. Request Lifecycle Sequence (Planned)
 
 This sequence diagram illustrates how a tool execution request will eventually flow through the internal resilience and caching layers, demonstrating the aggressive offline fallback strategy.
 
