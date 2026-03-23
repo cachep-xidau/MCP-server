@@ -1,0 +1,10 @@
+node_modules/
+build/
+coverage/
+remote-rag.db
+remote-rag.db-journal
+remote-rag.db-wal
+remote-rag.db-shm
+.env
+.env.local
+.DS_Store
