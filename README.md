@@ -19,7 +19,12 @@ The diagram below illustrates the complete execution environment, the background
 
 ```mermaid
 flowchart TD
-    Agent["AI Agent\n(Gemini/Claude/Codex)"]
+    subgraph HostIDE["Host IDE Environment"]
+        direction TB
+        Agent["AI Agent\n(Gemini/Claude/Codex)"]
+        Expander["Zod Schema Engine\n(Prompt-to-Keyword Expander)"]
+        Agent -- "Reads Tool Description" --> Expander
+    end
 
     subgraph MCP_Process["MCP Node.js Process (stdio)"]
         direction TB
@@ -49,7 +54,7 @@ flowchart TD
     MasterDB[("DON Architecture Server")]
     ExtAPIs["External APIs\n(Figma/Jira)"]
 
-    Agent == "Spawn & Query\n(JSON-RPC)" === Router
+    Expander == "Spawn & Query\n(JSON-RPC)" === Router
     T_Search -- "SQL MATCH" --> LocalDB
     ToolsLayer -- "HTTPS / REST" --> ExtAPIs
     MasterDB -. "Background CRON Sync" .-> LocalDB
@@ -62,14 +67,18 @@ This sequence diagram illustrates how a tool execution request flows through the
 ```mermaid
 sequenceDiagram
     participant AGY as AI Agent (IDE)
+    participant schema as Zod Schema Engine
     participant Core as MCP Core (stdio)
     participant Cache as L1/L2 Cache
     participant Res as Resilience (Breaker/Limiter)
     participant Tool as Tool (Figma/Jira)
     participant Ext as External API
     
-    AGY->>Core: Connects via stdio
-    AGY->>Core: CallTool(name, args)
+    AGY->>schema: "Find login docs"
+    schema->>schema: Parse Tool Description
+    schema->>schema: Expand into "login OR auth"
+    schema->>Core: Connects via stdio
+    schema->>Core: CallTool(name, args)
     
     Core->>Cache: Check Response Cache (Stale-if-error)
     alt Cache HIT (Valid)
