@@ -101,9 +101,31 @@ Aside from RAG queries, the server acts as an aggregation point (Facade Pattern)
 
 ---
 
-## 4. Implementation Steps Roadmap
-1. **Initialize Project:** `npm init -y` with `@modelcontextprotocol/sdk` inside the `MCP-server` repo.
-2. **Build the Stdio Server:** Expose a basic `search_company` tool.
-3. **Database Driver:** Install `better-sqlite3` locally; wire the query logic shown previously.
-4. **Agent Config:** Modify `gemini.config` or `.claude/mcp.json` to point the `command` target to the compiled JavaScript/Python root file.
-5. **Scale Services:** Sub-route Jira and Figma classes into the tool handler block.
+## 4. Repository Structure & Usage
+Mã nguồn đã được xây dựng chuẩn theo kiến trúc trên với các thành phần chính:
+- `src/index.ts`: Hub Router chính điều phối Stdio Transport.
+- `src/tools/search_kb.ts`: Truy vấn FTS5-BM25 SQLite.
+- `src/tools/figma.ts`, `jira.ts`, `confluence.ts`: Các Hub bọc Native REST API tới Atlassian và Figma.
+- `scripts/sync-db.sh`: Bash script đồng bộ Database nền tảng.
+
+### Cài đặt (Installation)
+1. Kéo repository về: `git clone https://github.com/cachep-xidau/MCP-server.git`
+2. Cài đặt thư viện: `npm install`
+3. Cấu hình `.env` dựa theo document (Cần JIRA_API_TOKEN, API_KEY_FIGMA, DB_PATH).
+4. Build mã nguồn: `npm run build`
+
+### Agent Configuration (Claude Code / Gemini / Cursor)
+Thêm khối cấu hình sau vào máy Local (VD: `~/.claude/.mcp.json`):
+```json
+"don-workspace-rag": {
+  "command": "node",
+  "args": ["/đường/dẫn/tới/MCP-server/build/index.js"]
+}
+```
+
+### Kích hoạt Đồng bộ DB (CronJob Sync)
+Bật script tự động kéo `remote-rag.db` từ Server công ty mỗi 5 phút bằng System Cron:
+```bash
+chmod +x scripts/sync-db.sh
+(crontab -l 2>/dev/null; echo "*/5 * * * * bash $(pwd)/scripts/sync-db.sh") | crontab -
+```
