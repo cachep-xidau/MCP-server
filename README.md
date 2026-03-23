@@ -15,7 +15,9 @@ When an AI Agent (Gemini in Antigravity, local Codex CLI, etc.) requires context
 
 ## 2. Architecture Topology
 
-The diagram below illustrates the complete execution environment, the background synchronization mechanism for the Knowledge Base, and the external API connections.
+### 2.1. Current Implementation (MVP Reality)
+
+This diagram illustrates the **actual state** of the `MCP-server` repository codebase today. It functions as a lightweight, barebones REST wrapper that queries APIs securely but currently lacks a dedicated resilience or caching layer.
 
 ```mermaid
 flowchart TD
@@ -30,11 +32,46 @@ flowchart TD
         direction TB
         Router["Core Router\n(Protocol Handler)"]
 
-        subgraph ResilienceLayer["Resilience & State Layer"]
+        subgraph ToolsLayer["Integration Hubs (Direct Fetch)"]
+            direction LR
+            T_Search["FTS5 Search"]
+            T_Figma["Figma Gateway"]
+            T_Jira["Jira Gateway"]
+        end
+
+        Router --> ToolsLayer
+    end
+
+    LocalDB[("Local RAG DB\n(SQLite WAL)")]
+    ExtAPIs["External APIs\n(Figma/Jira)"]
+
+    Expander == "Spawn & Query\n(JSON-RPC)" === Router
+    T_Search -- "SQL MATCH" --> LocalDB
+    ToolsLayer -- "Direct fetch()\n(No Cache / No Retry)" --> ExtAPIs
+```
+
+### 2.2. Desired Enterprise Architecture (Target State)
+
+This diagram outlines the **planned future state** of the system. It introduces a comprehensive `Resilience & State Layer` (Circuit Breakers, Token Bucket limiters, and Local caching) designed to prevent cascading failures and API throttling.
+
+```mermaid
+flowchart TD
+    subgraph HostIDE["Host IDE Environment"]
+        direction TB
+        Agent["AI Agent\n(Gemini/Claude/Codex)"]
+        Expander["Zod Schema Engine\n(Prompt-to-Keyword Expander)"]
+        Agent -- "Reads Tool Description" --> Expander
+    end
+
+    subgraph MCP_Process["MCP Node.js Process (stdio)"]
+        direction TB
+        Router["Core Router\n(Protocol Handler)"]
+
+        subgraph ResilienceLayer["Resilience & State Layer\n(TODO: Opossum, SQLite Cache)"]
             direction LR
             Breaker["Circuit Breaker"]
             Limiter["Rate Limiter"]
-            Cache["Cache Manager\n(L1 + L2 SQLite)"]
+            Cache["Cache Manager\n(L1 + L2)"]
         end
 
         subgraph ToolsLayer["Integration Hubs"]
@@ -60,9 +97,9 @@ flowchart TD
     MasterDB -. "Background CRON Sync" .-> LocalDB
 ```
 
-### 2.1. Request Lifecycle Sequence
+### 2.3. Request Lifecycle Sequence (Planned)
 
-This sequence diagram illustrates how a tool execution request flows through the internal resilience and caching layers, demonstrating the aggressive offline fallback strategy.
+This sequence diagram illustrates how a tool execution request will eventually flow through the internal resilience and caching layers, demonstrating the aggressive offline fallback strategy.
 
 ```mermaid
 sequenceDiagram
