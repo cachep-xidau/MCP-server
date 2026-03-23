@@ -19,30 +19,24 @@ The diagram below illustrates the complete execution environment, the background
 
 ```mermaid
 flowchart TD
-    classDef agent fill:#0984e3,stroke:#74b9ff,stroke-width:2px,color:#fff;
-    classDef hub fill:#2d3436,stroke:#74b9ff,stroke-width:2px,color:#dfe6e9;
-    classDef resilience fill:#e17055,stroke:#ffeaa7,stroke-width:2px,color:#fff;
-    classDef db fill:#00b894,stroke:#55efc4,stroke-width:2px,color:#fff;
-    classDef server fill:#d63031,stroke:#fab1a0,stroke-width:2px,color:#fff;
+    Agent["AI Agent\n(Gemini/Claude/Codex)"]
 
-    Agent["🤖 AI Agent\n(Gemini/Claude/Codex)"]:::agent
-
-    subgraph MCP_Process["📦 MCP Node.js Process (stdio)"]
+    subgraph MCP_Process["MCP Node.js Process (stdio)"]
         direction TB
-        Router["🔌 Core Router\n(Protocol Handler)"]:::hub
+        Router["Core Router\n(Protocol Handler)"]
 
-        subgraph ResilienceLayer["🛡️ Resilience & State Layer"]
+        subgraph ResilienceLayer["Resilience & State Layer"]
             direction LR
-            Breaker["⚡ Circuit Breaker"]:::resilience
-            Limiter["🚥 Rate Limiter"]:::resilience
-            Cache["🧠 Cache Manager\n(L1 + L2 SQLite)"]:::resilience
+            Breaker["Circuit Breaker"]
+            Limiter["Rate Limiter"]
+            Cache["Cache Manager\n(L1 + L2 SQLite)"]
         end
 
-        subgraph ToolsLayer["🛠️ Integration Hubs"]
+        subgraph ToolsLayer["Integration Hubs"]
             direction LR
-            T_Search["🔍 FTS5 Search"]:::hub
-            T_Figma["🎨 Figma Gateway"]:::hub
-            T_Jira["🎫 Jira Gateway"]:::hub
+            T_Search["FTS5 Search"]
+            T_Figma["Figma Gateway"]
+            T_Jira["Jira Gateway"]
         end
 
         Router --> ResilienceLayer
@@ -51,9 +45,9 @@ flowchart TD
         Cache -. "Cache Miss" .-> ToolsLayer
     end
 
-    LocalDB[("💽 Local RAG DB\n(SQLite WAL)")]:::db
-    MasterDB[("☁️ DON Architecture Server")]:::server
-    ExtAPIs["🌍 External APIs\n(Figma/Jira)"]:::server
+    LocalDB[("Local RAG DB\n(SQLite WAL)")]
+    MasterDB[("DON Architecture Server")]
+    ExtAPIs["External APIs\n(Figma/Jira)"]
 
     Agent == "Spawn & Query\n(JSON-RPC)" === Router
     T_Search -- "SQL MATCH" --> LocalDB
