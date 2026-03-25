@@ -42,7 +42,7 @@ flowchart TD
         Router --> ToolsLayer
     end
 
-    LocalDB[("Local RAG DB\n(SQLite WAL)")]
+    LocalDB[("Local RAG DB\n(SQLite WAL)\nRole: Zero-Latency Edge Caching,\nLocal Path Mapping")]
     ExtAPIs["External APIs\n(Figma/Jira)"]
 
     Expander == "Spawn & Query\n(JSON-RPC)" === Router
@@ -118,14 +118,15 @@ flowchart TD
         Cache -. "Cache Miss" .-> ToolsLayer
     end
 
-    LocalDB[("Local RAG DB\n(SQLite WAL)")]
-    MasterDB[("DON Architecture Server")]
+    LocalDB[("Local RAG DB\n(SQLite WAL)\nRole: Zero-Latency Edge Caching,\nLocal Path Mapping, Draft Isolation")]
+    MasterDB[("VPS Central Database\n(DON Architecture Server)\nRole: Source of Truth,\nLong-term Retention")]
     ExtAPIs["External APIs\n(Figma/Jira)"]
 
     Expander == "Spawn & Query\n(JSON-RPC)" === Router
     T_Search -- "SQL MATCH" --> LocalDB
     ToolsLayer -- "HTTPS / REST" --> ExtAPIs
-    MasterDB -. "Background CRON Sync" .-> LocalDB
+    LocalDB -. "Trigger/Delta-Sync\n(Push Hashes/Outputs via API)" .-> MasterDB
+    MasterDB -. "Background Embedded Sync\n(Turso/Cron Pull)" .-> LocalDB
 ```
 
 ### 2.4. Request Lifecycle Sequence (Planned)
