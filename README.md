@@ -87,43 +87,48 @@ This diagram outlines the **planned future state** of the system. It introduces 
 
 ```mermaid
 flowchart TD
-    subgraph HostIDE["Host IDE Environment"]
+    subgraph Local_Workspace["Local Machine (Laptop/PC)"]
         direction TB
-        Agent["AI Agent\n(Gemini/Claude/Codex)"]
-        Expander["Zod Schema Engine\n(Prompt-to-Keyword Expander)"]
-        Agent -- "Reads Tool Description" --> Expander
-    end
-
-    subgraph MCP_Process["MCP Node.js Process (stdio)"]
-        direction TB
-        Router["Core Router\n(Protocol Handler)"]
-
-        subgraph ResilienceLayer["Resilience & State Layer\n(TODO: Opossum, SQLite Cache)"]
-            direction LR
-            Breaker["Circuit Breaker"]
-            Limiter["Rate Limiter"]
-            Cache["Cache Manager\n(L1 + L2)"]
+        
+        subgraph HostIDE["Host IDE Environment"]
+            Agent["AI Agent\n(Gemini/Claude/Codex)"]
+            Expander["Zod Schema Engine\n(Prompt-to-Keyword Expander)"]
+            Agent -- "Reads Tool Description" --> Expander
         end
 
-        subgraph ToolsLayer["Integration Hubs"]
-            direction LR
-            T_Search["FTS5 Search"]
-            T_Figma["Figma Gateway"]
-            T_Jira["Jira Gateway"]
+        subgraph MCP_Process["MCP Node.js Process (stdio)"]
+            Router["Core Router\n(Protocol Handler)"]
+
+            subgraph ResilienceLayer["Resilience & State Layer\n(TODO: Opossum, SQLite Cache)"]
+                Breaker["Circuit Breaker"]
+                Limiter["Rate Limiter"]
+                Cache["Cache Manager\n(L1 + L2)"]
+            end
+
+            subgraph ToolsLayer["Integration Hubs"]
+                T_Search["FTS5 Search"]
+                T_Figma["Figma Gateway"]
+                T_Jira["Jira Gateway"]
+            end
+
+            Router --> ResilienceLayer
+            Breaker --> Limiter
+            Limiter --> Cache
+            Cache -. "Cache Miss" .-> ToolsLayer
         end
 
-        Router --> ResilienceLayer
-        Breaker --> Limiter
-        Limiter --> Cache
-        Cache -. "Cache Miss" .-> ToolsLayer
+        LocalDB[("Local RAG DB\n(SQLite WAL)\nRole: Zero-Latency Edge Caching,\nLocal Path Mapping, Draft Isolation")]
+        
+        Expander == "Spawn & Query\n(JSON-RPC)" === Router
+        T_Search -- "SQL MATCH" --> LocalDB
     end
 
-    LocalDB[("Local RAG DB\n(SQLite WAL)\nRole: Zero-Latency Edge Caching,\nLocal Path Mapping, Draft Isolation")]
-    MasterDB[("VPS Central Database\n(DON Architecture Server)\nRole: Source of Truth,\nLong-term Retention")]
-    ExtAPIs["External APIs\n(Figma/Jira)"]
+    subgraph Cloud_Environment["Remote VPS (Cloud)"]
+        direction TB
+        MasterDB[("VPS Central Database\n(DON Architecture Server)\nRole: Source of Truth,\nLong-term Retention")]
+        ExtAPIs["External APIs\n(Figma/Jira)"]
+    end
 
-    Expander == "Spawn & Query\n(JSON-RPC)" === Router
-    T_Search -- "SQL MATCH" --> LocalDB
     ToolsLayer -- "HTTPS / REST" --> ExtAPIs
     LocalDB -. "Trigger/Delta-Sync\n(Push Hashes/Outputs via API)" .-> MasterDB
     MasterDB -. "Background Embedded Sync\n(Turso/Cron Pull)" .-> LocalDB
