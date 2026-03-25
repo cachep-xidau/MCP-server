@@ -55,7 +55,7 @@ flowchart TD
     end
 
     ToolsLayer -- "Direct fetch()\n(No Cache / No Retry)" --> ExtAPIs
-    LocalDB -. "Disconnected\n(No Sync currently)" .-x MasterDB
+    MasterDB -. "Background OS Cron\n(scripts/sync-db.sh\nevery 5 mins)" .-> LocalDB
 ```
 
 ### 2.2. Request Lifecycle Sequence (MVP Reality)
