@@ -21,33 +21,41 @@ This diagram illustrates the **actual state** of the `MCP-server` repository cod
 
 ```mermaid
 flowchart TD
-    subgraph HostIDE["Host IDE Environment"]
+    subgraph Local_Workspace["Local Machine (Laptop/PC)"]
         direction TB
-        Agent["AI Agent\n(Gemini/Claude/Codex)"]
-        Expander["Zod Schema Engine\n(Prompt-to-Keyword Expander)"]
-        Agent -- "Reads Tool Description" --> Expander
-    end
-
-    subgraph MCP_Process["MCP Node.js Process (stdio)"]
-        direction TB
-        Router["Core Router\n(Protocol Handler)"]
-
-        subgraph ToolsLayer["Integration Hubs (Direct Fetch)"]
-            direction LR
-            T_Search["FTS5 Search"]
-            T_Figma["Figma Gateway"]
-            T_Jira["Jira Gateway"]
+        
+        subgraph HostIDE["Host IDE Environment"]
+            Agent["AI Agent\n(Gemini/Claude/Codex)"]
+            Expander["Zod Schema Engine\n(Prompt-to-Keyword Expander)"]
+            Agent -- "Reads Tool Description" --> Expander
         end
 
-        Router --> ToolsLayer
+        subgraph MCP_Process["MCP Node.js Process (stdio)"]
+            Router["Core Router\n(Protocol Handler)"]
+
+            subgraph ToolsLayer["Integration Hubs (Direct Fetch)"]
+                T_Search["FTS5 Search"]
+                T_Figma["Figma Gateway"]
+                T_Jira["Jira Gateway"]
+            end
+
+            Router --> ToolsLayer
+        end
+
+        LocalDB[("Local RAG DB\n(SQLite WAL)\nRole: Zero-Latency Edge Caching,\nLocal Path Mapping")]
+        
+        Expander == "Spawn & Query\n(JSON-RPC)" === Router
+        T_Search -- "SQL MATCH" --> LocalDB
     end
 
-    LocalDB[("Local RAG DB\n(SQLite WAL)\nRole: Zero-Latency Edge Caching,\nLocal Path Mapping")]
-    ExtAPIs["External APIs\n(Figma/Jira)"]
+    subgraph Cloud_Environment["Remote VPS (Cloud)"]
+        direction TB
+        MasterDB[("VPS Central Database\n(DON Architecture Server)\nRole: Source of Truth")]
+        ExtAPIs["External APIs\n(Figma/Jira)"]
+    end
 
-    Expander == "Spawn & Query\n(JSON-RPC)" === Router
-    T_Search -- "SQL MATCH" --> LocalDB
     ToolsLayer -- "Direct fetch()\n(No Cache / No Retry)" --> ExtAPIs
+    LocalDB -. "Disconnected\n(No Sync currently)" .-x MasterDB
 ```
 
 ### 2.2. Request Lifecycle Sequence (MVP Reality)
