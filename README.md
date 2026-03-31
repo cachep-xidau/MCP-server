@@ -18,26 +18,26 @@ The **Decoupled RAG MCP Server** solves the Out-of-Memory (OOM) and latency chal
 ### 2.1 Context Diagram
 ```mermaid
 graph TD
-    User((Người dùng\nLocal Mac))
-    Antigravity(Claude Desktop /\nAntigravity)
-    RAG_System["Decoupled RAG System\n(MCP Server + VPS Ingestor)"]
-    Atlassian[(Atlassian Cloud\nJira/Confluence)]
-    HuggingFace[(HuggingFace\nModels Hub)]
+    User((Local User))
+    Antigravity(Claude Desktop / Antigravity)
+    RAG_System[Decoupled RAG System]
+    Atlassian[(Atlassian Cloud)]
+    HuggingFace[(HuggingFace Models Hub)]
 
-    User -->|Chat, Yêu cầu phân tích PRD| Antigravity
-    Antigravity -->|Gọi Tools qua giao thức MCP| RAG_System
-    RAG_System -->|Cào dữ liệu Wiki/Ticket định kỳ| Atlassian
-    RAG_System -->|Tải Model BAAI/bge-m3| HuggingFace
+    User -->|Chat / Request Analysis| Antigravity
+    Antigravity -->|Invoke tools via MCP| RAG_System
+    RAG_System -->|Schedule scraping| Atlassian
+    RAG_System -->|Download BAAI/bge-m3| HuggingFace
 ```
 
 ### 2.2 Container Diagram
 ```mermaid
 graph TB
     subgraph "VPS Environment (Ubuntu Server)"
-        Cron[Cronjob Scheduler\n(Linux)]
-        Ingestor[Python Ingestor Script\nrag_pipeline.py]
-        HF_Model_VPS[HuggingFace Model\nBAAI/bge-m3]
-        DB_VPS[(ChromaDB\nVector Database)]
+        Cron[Cronjob Scheduler]
+        Ingestor[Python Ingestor Script]
+        HF_Model_VPS[HuggingFace Model]
+        DB_VPS[(ChromaDB Vector Database)]
         
         Cron -->|Trigger 1:00 AM| Ingestor
         Ingestor -->|Init & Embed Text| HF_Model_VPS
@@ -45,12 +45,12 @@ graph TB
     end
 
     subgraph "Local Environment (macOS)"
-        SyncAgent[macOS LaunchAgent\ncom.company.ragsync]
-        DB_Local[(ChromaDB\nLocal Mirror)]
-        MCP_Server[Python FastMCP Server\nserver.py]
-        HF_Model_Local[HuggingFace Model\nBAAI/bge-m3]
+        SyncAgent[macOS LaunchAgent]
+        DB_Local[(ChromaDB Local Mirror)]
+        MCP_Server[Python FastMCP Server]
+        HF_Model_Local[HuggingFace Model]
         
-        SyncAgent -->|Rsync Pull (mỗi 4h)| DB_VPS
+        SyncAgent -->|Rsync Pull| DB_VPS
         SyncAgent -->|Update| DB_Local
         MCP_Server -->|Read Vectors| DB_Local
         MCP_Server -->|Embed User Query| HF_Model_Local
@@ -71,17 +71,17 @@ sequenceDiagram
     participant Model as HuggingFace (bge-m3)
     participant Atlas as Atlassian (Confluence/Jira)
     
-    VPS->>Atlas: Request toàn bộ pages từ Spaces
-    Atlas-->>VPS: Trả về Raw HTML / JSON
-    Note over VPS: Chunking: Cắt văn bản nhỏ
-    VPS->>Model: Tải Model BAAI/bge-m3
-    Note over VPS: Embedding: Chuyển đổi chunks thành Vector (3GB Swap)
-    VPS->>VPS: Lưu chuỗi Vector xuống chroma_db/
+    VPS->>Atlas: Request all pages from Spaces
+    Atlas-->>VPS: Return Raw HTML / JSON
+    Note over VPS: Chunking: Split text into small segments
+    VPS->>Model: Download Model BAAI/bge-m3
+    Note over VPS: Embedding: Convert chunks to Vectors (3GB Swap)
+    VPS->>VPS: Persist Vector Matrix to chroma_db/
     
-    loop Cứ mỗi 4 Tiếng (Background)
-        Mac->>VPS: Gọi lệnh Rsync qua SSH
-        VPS-->>Mac: Transmit các file thay đổi (Delta sync) ChromaDB
-        Mac->>Mac: Cập nhật thư mục chroma_db dưới Local
+    loop Every 4 Hours (Background)
+        Mac->>VPS: Execute Rsync over SSH
+        VPS-->>Mac: Transmit incremental changes (Delta sync)
+        Mac->>Mac: Update local chroma_db directory
     end
 ```
 
@@ -89,22 +89,22 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User as Người dùng
+    actor User as Local User
     participant AI as Antigravity (LLM)
-    participant MCP as Python MCP Server (Local)
+    participant MCP as Python MCP Server
     participant LB_Model as Local Model (bge-m3)
     participant DB as Local ChromaDB
     
-    User->>AI: "Hãy tìm PRD về Notification"
-    Note over AI: Nhận diện Intent -> Gọi Tool
-    AI->>MCP: Call tool: search_agile_docs(query)
-    MCP->>LB_Model: Gửi câu truy vấn dạng Text
-    LB_Model-->>MCP: Trả về Query Vector (Ma trận nhúng)
-    MCP->>DB: Truy vấn tương đồng (Similarity Search)
-    DB-->>MCP: Trả về Top văn bản liên quan nhất
-    MCP-->>AI: Trả về Markdown String (Kèm URL Source & Title)
-    Note over AI: LLM đọc hiểu Context truyền vào
-    AI-->>User: "Dựa vào tài liệu, tính năng Notification yêu cầu..."
+    User->>AI: "Search PRD for Notification Feature"
+    Note over AI: Identifies Intent -> Calls Tool
+    AI->>MCP: Call tool: search_agile_docs
+    MCP->>LB_Model: Send query text
+    LB_Model-->>MCP: Return Query Vector Matrix
+    MCP->>DB: Exec Similarity Search (Cosine)
+    DB-->>MCP: Return Top K related context chunks
+    MCP-->>AI: Return formatted Markdown String (w/ URL)
+    Note over AI: LLM synthesizes context
+    AI-->>User: "Based on the documentation, the notification logic is..."
 ```
 
 ## 4. Repository Structure & Installation
