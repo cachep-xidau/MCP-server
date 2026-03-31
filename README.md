@@ -1,149 +1,129 @@
-# Architecture Design: DON Workspace MCP Server
+# Architecture Design: Decoupled RAG MCP Server
 
-**Date:** 2026-03-23
-**Repository:** [MCP-server](https://github.com/cachep-xidau/MCP-server.git)
-**Target Audience:** Internal Developer Team (6-10 members), BSA, Tech Leads
-**Primary Goal:** Establish a unified Local MCP hub providing integrations with Figma, Jira, Confluence, and high-speed Offline RAG querying.
+**Date:** 2026-03-31  
+**Repository:** [MCP-server](https://github.com/cachep-xidau/MCP-server.git)  
+**Target Audience:** Internal Developer Team (6-10 members), BSA, Tech Leads  
+**Primary Goal:** Establish a unified Local MCP hub providing integrations with Figma, Jira, Confluence, and high-speed Offline Semantic RAG querying without relying on paid AI API keys.
 
 ---
 
 ## 1. System Overview
 
-The **DON Workspace MCP Server** operates entirely on the "Local-First" methodology (Zero-Latency, YAGNI, KISS). Instead of establishing a vulnerable and latency-heavy remote server for AI Tool queries, the MCP Server is deployed locally on every team member's workspace (Laptop/PC) using the **`stdio` communication protocol**.
+The **Decoupled RAG MCP Server** solves the Out-of-Memory (OOM) and latency challenges of running Heavy AI Models by splitting the pipeline into two environments:
+1. **VPS Ingestor (Heavy Lifting):** Runs nightly via Cronjob. Scrapes Atlassian spaces, chunks data, and generates vectors using the open-source `BAAI/bge-m3` model via 3GB Swap processing. Outputs to ChromaDB.
+2. **Local MCP Server (Zero-Latency Edge):** Runs on the team member's macOS. Quickly syncs the ChromaDB delta via `rsync` and resolves RAG queries instantly using local Mac CPU/RAM.
 
-When an AI Agent (Gemini in Antigravity, local Codex CLI, etc.) requires context or external actions, it spawns this MCP Server locally.
+## 2. Architecture Topology (C4 Models)
 
-## 2. Architecture Topology
-
-### 2.1. Current Implementation (MVP Reality)
-
-This diagram illustrates the **actual state** of the `MCP-server` repository codebase today. It functions as a lightweight, barebones REST wrapper that queries APIs securely but currently lacks a dedicated resilience or caching layer.
-
+### 2.1 Context Diagram
 ```mermaid
-flowchart TD
-    subgraph Local_Workspace["Local Machine (Laptop/PC)"]
-        direction TB
-        
-        subgraph HostIDE["Host IDE Environment"]
-            Agent["AI Agent\n(Gemini/Claude/Codex)"]
-            Expander["Zod Schema Engine\n(Prompt-to-Keyword Expander)"]
-            Agent -- "Reads Tool Description" --> Expander
-        end
+graph TD
+    User((Người dùng\nLocal Mac))
+    Antigravity(Claude Desktop /\nAntigravity)
+    RAG_System["Decoupled RAG System\n(MCP Server + VPS Ingestor)"]
+    Atlassian[(Atlassian Cloud\nJira/Confluence)]
+    HuggingFace[(HuggingFace\nModels Hub)]
 
-        subgraph MCP_Process["MCP Node.js Process (stdio)"]
-            Router["Core Router\n(Protocol Handler)"]
-
-            subgraph ToolsLayer["Integration Hubs (Direct Fetch)"]
-                T_Search["FTS5 Search"]
-                T_Figma["Figma Gateway"]
-                T_Jira["Jira Gateway"]
-            end
-
-            Router --> ToolsLayer
-        end
-
-        LocalDB[("Local RAG DB\n(SQLite WAL)\nRole: Zero-Latency Edge Caching,\nLocal Path Mapping")]
-        
-        Expander == "Spawn & Query\n(JSON-RPC)" === Router
-        T_Search -- "SQL MATCH" --> LocalDB
-    end
-
-    subgraph Cloud_Environment["Remote VPS (Cloud)"]
-        direction TB
-        MasterDB[("VPS Central Database\n(DON Architecture Server)\nRole: Source of Truth")]
-        ExtAPIs["External APIs\n(Figma/Jira)"]
-    end
-
-    ToolsLayer -- "Direct fetch()\n(No Cache / No Retry)" --> ExtAPIs
-    MasterDB -. "Background OS Cron\n(scripts/sync-db.sh\nevery 5 mins)" .-> LocalDB
+    User -->|Chat, Yêu cầu phân tích PRD| Antigravity
+    Antigravity -->|Gọi Tools qua giao thức MCP| RAG_System
+    RAG_System -->|Cào dữ liệu Wiki/Ticket định kỳ| Atlassian
+    RAG_System -->|Tải Model BAAI/bge-m3| HuggingFace
 ```
 
-### 2.2. Request Lifecycle Sequence (MVP Reality)
+### 2.2 Container Diagram
+```mermaid
+graph TB
+    subgraph "VPS Environment (Ubuntu Server)"
+        Cron[Cronjob Scheduler\n(Linux)]
+        Ingestor[Python Ingestor Script\nrag_pipeline.py]
+        HF_Model_VPS[HuggingFace Model\nBAAI/bge-m3]
+        DB_VPS[(ChromaDB\nVector Database)]
+        
+        Cron -->|Trigger 1:00 AM| Ingestor
+        Ingestor -->|Init & Embed Text| HF_Model_VPS
+        Ingestor -->|Save Vectors| DB_VPS
+    end
 
-This simple sequence diagram shows the reality of the current barebones implementation: direct API calls without caching, retry logic, or failure mitigation.
+    subgraph "Local Environment (macOS)"
+        SyncAgent[macOS LaunchAgent\ncom.company.ragsync]
+        DB_Local[(ChromaDB\nLocal Mirror)]
+        MCP_Server[Python FastMCP Server\nserver.py]
+        HF_Model_Local[HuggingFace Model\nBAAI/bge-m3]
+        
+        SyncAgent -->|Rsync Pull (mỗi 4h)| DB_VPS
+        SyncAgent -->|Update| DB_Local
+        MCP_Server -->|Read Vectors| DB_Local
+        MCP_Server -->|Embed User Query| HF_Model_Local
+    end
 
+    Atlassian_Ext([Atlassian API]) -->|Fetch Data| Ingestor
+    LLM_Client([LLM Client]) <-->|stdio / MCP Protocol| MCP_Server
+```
+
+## 3. Request Lifecycle Sequence Diagrams
+
+### 3.1 Data Sync & Ingestion Flow (Nightly)
 ```mermaid
 sequenceDiagram
-    participant AGY as AI Agent (IDE)
-    participant schema as Zod Schema Engine
-    participant Core as MCP Core (stdio)
-    participant Tool as Tool (Figma/Jira/Search)
-    participant Ext as External API / SQLite
+    autonumber
+    participant Mac as Local MacOS (SyncAgent)
+    participant VPS as VPS Server (Cronjob)
+    participant Model as HuggingFace (bge-m3)
+    participant Atlas as Atlassian (Confluence/Jira)
     
-    AGY->>schema: Prompt: "Fetch Figma file X"
-    schema->>schema: Parse Tool Description
-    schema->>Core: Connects via stdio
-    schema->>Core: CallTool(name, args)
+    VPS->>Atlas: Request toàn bộ pages từ Spaces
+    Atlas-->>VPS: Trả về Raw HTML / JSON
+    Note over VPS: Chunking: Cắt văn bản nhỏ
+    VPS->>Model: Tải Model BAAI/bge-m3
+    Note over VPS: Embedding: Chuyển đổi chunks thành Vector (3GB Swap)
+    VPS->>VPS: Lưu chuỗi Vector xuống chroma_db/
     
-    Core->>Tool: Execute Protocol Route
-    Tool->>Ext: Direct HTTPS Request / DB Query
-    
-    alt Network Success
-        Ext-->>Tool: 200 OK / Data
-        Tool-->>Core: JSON Response
-    else Network Failure / Timeout
-        Ext--xTool: 5xx / Timeout / Throttle
-        Tool-->>Core: Error string (Fatal, No Retry)
+    loop Cứ mỗi 4 Tiếng (Background)
+        Mac->>VPS: Gọi lệnh Rsync qua SSH
+        VPS-->>Mac: Transmit các file thay đổi (Delta sync) ChromaDB
+        Mac->>Mac: Cập nhật thư mục chroma_db dưới Local
     end
-    
-    Core-->>AGY: ToolResult
 ```
 
+### 3.2 Real-time RAG Query Flow
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as Người dùng
+    participant AI as Antigravity (LLM)
+    participant MCP as Python MCP Server (Local)
+    participant LB_Model as Local Model (bge-m3)
+    participant DB as Local ChromaDB
+    
+    User->>AI: "Hãy tìm PRD về Notification"
+    Note over AI: Nhận diện Intent -> Gọi Tool
+    AI->>MCP: Call tool: search_agile_docs(query)
+    MCP->>LB_Model: Gửi câu truy vấn dạng Text
+    LB_Model-->>MCP: Trả về Query Vector (Ma trận nhúng)
+    MCP->>DB: Truy vấn tương đồng (Similarity Search)
+    DB-->>MCP: Trả về Top văn bản liên quan nhất
+    MCP-->>AI: Trả về Markdown String (Kèm URL Source & Title)
+    Note over AI: LLM đọc hiểu Context truyền vào
+    AI-->>User: "Dựa vào tài liệu, tính năng Notification yêu cầu..."
+```
 
+## 4. Repository Structure & Installation
 
----
-
-## 3. Core Components Breakdown
-
-### 3.1. Local AI Agent & Stdio Protocol
-The AI Agent initiates the standard Model Context Protocol via standard input/output (`stdio`). 
-- **Ram Usage:** Extremely lightweight. Booting the Node.js/Python MCP process temporarily consumes only ~50-120MB memory. Process dies gracefully when the AI session ends.
-- **Latency:** Execution time is limited purely by local CPU processing power. Network latency for establishing a tool connection is exactly `0ms`.
-
-### 3.2. RAG Tool (FTS5-BM25 SQLite)
-The primary Search Tool used by the `DON MCP Server`.
-- Performs **Query Expansion** and applies `trigram`/`porter` tokenizers alongside FTS5.
-- Uses the `snippet()` function to retrieve small contextual paragraphs rather than whole documents.
-- Retrieves text exclusively from the local `remote-rag.db` replica, ensuring massive queries will not spam the central server or incur delay.
-
-### 3.3. Remote Data Sync (Background Daemon)
-For 10 simultaneous projects with constant internal spec updates, forcing the MCP to pull standard queries across the network is anti-pattern.
-- A small background job (Cron/Script) continuously pulls the authoritative `remote-rag.db` from the **DON Architecture Server** to the `~/Company` workspace.
-- **SQLite Advantage:** Reading the DB file doesn't block background pulling/replacing if orchestrated via WAL mode (Write-Ahead Logging). 
-
-### 3.4. Multi-Service Integrations
-Aside from RAG queries, the server acts as an aggregation point (Facade Pattern) for specialized automation:
-- **Jira MCP:** Create Epics, track story points, retrieve acceptance criteria.
-- **Confluence MCP:** Provide dynamic scraping when the offline RAG database doesn't hold the latest 5-minute changes.
-- **Figma MCP:** Fetch design token updates, verify screen layouts against Figma nodes.
-
----
-
-## 4. Repository Structure & Usage
-Mã nguồn đã được xây dựng chuẩn theo kiến trúc trên với các thành phần chính:
-- `src/index.ts`: Hub Router chính điều phối Stdio Transport.
-- `src/tools/search_kb.ts`: Truy vấn FTS5-BM25 SQLite.
-- `src/tools/figma.ts`, `jira.ts`, `confluence.ts`: Các Hub bọc Native REST API tới Atlassian và Figma.
-- `scripts/sync-db.sh`: Bash script đồng bộ Database nền tảng.
+Mã nguồn hệ thống nay đã chuyển mình qua kiến trúc Python/ChromaDB:
+- `vps-ingestor/rag_pipeline.py`: Cào dữ liệu chạy trên cronjob VPS Ubuntu.
+- `local-rag-mcp/server.py`: FastMCP Server giao tiếp qua Stdio.
+- `local-rag-mcp/sync.sh`: LaunchAgent rsync tự động.
 
 ### Cài đặt (Installation)
 1. Kéo repository về: `git clone https://github.com/cachep-xidau/MCP-server.git`
-2. Cài đặt thư viện: `npm install`
-3. Cấu hình `.env` dựa theo document (Cần JIRA_API_TOKEN, API_KEY_FIGMA, DB_PATH).
-4. Build mã nguồn: `npm run build`
+2. Tạo Virtual Environment chuẩn: `python3 -m venv venv && source venv/bin/activate`
+3. Cài đặt Data Science Core: `pip install -r requirements.txt` (HuggingFace, sentence-transformers, mcp, chromadb)
 
-### Agent Configuration (Claude Code / Gemini / Cursor)
-Thêm khối cấu hình sau vào máy Local (VD: `~/.claude/.mcp.json`):
+### Agent Configuration (Antigravity/Cursor)
+Khai báo trực tiếp môi trường venv vào `mcp_config.json`:
 ```json
-"don-workspace-rag": {
-  "command": "node",
-  "args": ["/đường/dẫn/tới/MCP-server/build/index.js"]
+"jira-confluence-rag": {
+  "command": "/Đường/dẫn/tới/MCP-server/local-rag-mcp/venv/bin/python",
+  "args": ["/Đường/dẫn/tới/MCP-server/local-rag-mcp/server.py"]
 }
-```
-
-### Kích hoạt Đồng bộ DB (CronJob Sync)
-Bật script tự động kéo `remote-rag.db` từ Server công ty mỗi 5 phút bằng System Cron:
-```bash
-chmod +x scripts/sync-db.sh
-(crontab -l 2>/dev/null; echo "*/5 * * * * bash $(pwd)/scripts/sync-db.sh") | crontab -
 ```
