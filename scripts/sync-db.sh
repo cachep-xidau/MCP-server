@@ -3,7 +3,7 @@
 # Runs naturally on Mac OS via Cron.
 
 # Credentials extracted from standard .env
-VPS_HOST="144.91.86.227"
+VPS_HOST="<TAILSCALE_VPN_IP>"
 VPS_USER="root"
 # UPDATE THIS PATH to where the 48MB remote-rag.db lives on your VPS
 REMOTE_PATH="/opt/don-architecture/remote-rag.db"

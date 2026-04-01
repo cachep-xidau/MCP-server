@@ -127,3 +127,10 @@ Khai báo trực tiếp môi trường venv vào `mcp_config.json`:
   "args": ["/Đường/dẫn/tới/MCP-server/local-rag-mcp/server.py"]
 }
 ```
+
+## 5. Security & Connectivity (Zero-Trust)
+
+To guarantee high security and prevent unauthorized access or SSH brute-force attacks on the VPS:
+- **Tailscale VPN:** The macOS client (SyncAgent) connects to the VPS exclusively via the internal Tailscale network (`<TAILSCALE_VPN_IP>`).
+- **Firewall (UFW):** The public SSH port (22) and high ports are blocked from the public internet. All `rsync` traffic runs directly over the `tailscale0` interface.
+- **SSH Key Authentication:** Password authentication is completely disabled on the VPS. The chronological `sync-db.sh` scripts rely firmly on the `id_ed25519` private key for seamless background execution.
