@@ -42,7 +42,7 @@ flowchart TD
     G3 -.-> C3 -.-> P3 -.-> O3
 
     %% FORK POST GATE 03
-    subgraph "Fork Sau Gate 03 (Enrichment)"
+    subgraph "Post-Gate 03 Fork (Enrichment)"
         F_ARCH["don.architecture<br>architecture.md"]:::cmd
         F_UX["don.ux<br>ux-design-specification.md"]:::cmd
     end
@@ -50,8 +50,8 @@ flowchart TD
     G3 -.-> F_ARCH
     G3 -.-> F_UX
     
-    F_NOTE1("Design bị block nếu thiếu architecture.md"):::note
-    F_NOTE2("Design bị block nếu thiếu ux-design-specification.md"):::note
+    F_NOTE1("Design blocked if missing architecture.md"):::note
+    F_NOTE2("Design blocked if missing ux-design-specification.md"):::note
     
     F_ARCH -.-> F_NOTE1 -.-> G5
     F_UX -.-> F_NOTE2 -.-> G5
