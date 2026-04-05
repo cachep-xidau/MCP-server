@@ -217,3 +217,31 @@ flowchart TD
     O6("Owner: Sally / Don"):::owner
     G6 -.-> C6 -.-> P6 -.-> O6
 ```
+
+## 6. Đánh giá hiệu suất: RAG + Workflow vs. Direct Search
+
+Bảng dưới đây so sánh hiệu suất hệ thống khi sử dụng phương pháp tìm kiếm trực tiếp lẻ tẻ (Direct Search / Single Skills) so với mô hình tích hợp tự động kết hợp ngữ nghĩa và quy trình (RAG + Workflow).
+
+| Tiêu chí đánh giá | Direct Search / Single Skills | RAG + Workflow (MCP-server) |
+| :--- | :--- | :--- |
+| **Tốc độ tìm kiếm chính xác & Độ chính xác**<br>*(Task Completion Velocity & Context Precision)* | Trung bình. Lệ thuộc nặng vào tính chính xác của từ khóa (Keyword-matching). | **Rất cao.** Sử dụng text embeddings (Vector Similarity) bắt đúng ngữ cảnh. |
+| **Tốc độ tìm kiếm mơ hồ & Độ chính xác**<br>*(Fuzzy Queries)* | Thấp. Dễ thất bại, trả về tài liệu không liên quan nếu thiếu từ khóa chuẩn. | **Cao.** Hiểu ý định ngữ nghĩa, tự động map các abstract concept với Docs phù hợp. |
+| **Automation Rate**<br>*(Tỷ lệ tự động hóa)* | ~30% - 40% (Con người phải tự lọc lại, xâu chuỗi thông tin và chuyển skill liên tục). | **~85% - 90%** (Context được tự động inject mượt mà từ Atlassian vào thẳng luồng phân tích). |
+| **Thời gian phát triển (Man-hours)** | Thấp (Sử dụng các công cụ có sẵn, không chi phí tích hợp phần cứng/phần mềm). | **Cao** trong giai đoạn đầu (Setup VPS Ingestor, ChromaDB, Edge node, Tailscale). |
+| **Labor Arbitrage**<br>*(Thay thế chi phí nhân công)* | Thấp - Trung bình (Giảm thiểu một số tác vụ tra cứu thủ công). | **Rất cao** (Thay thế 1 phần lớn khối lượng công việc tổng hợp của Junior/Mid-level BA). |
+| **Error Rate in Execution**<br>*(Tỷ lệ lỗi thực thi)* | Cao. Nguy cơ sót tài liệu, lỗi AI "ảo giác" (Hallucinations) do context bị gãy. | **Thấp.** Phân mảnh dữ liệu thành chunk nhỏ chuẩn xác (Top-K) giảm nhiễu cực đại. |
+| **Human-in-the-loop Frequency** | Liên tục (Con người liên tục phải mớm prompt và duyệt từng bước). | **Thưa thớt.** Tác động chủ yếu ở các "Gate" phê duyệt chiến lược (Review Proof). |
+| **Số lượng Token tiêu tốn** | Cao (Tốn token nạp đi nạp lại context thừa, hoặc copy-paste cả trang dài). | **Tối ưu** (Do chỉ retrieve và inject Top-K chunk nhỏ chứa đúng thông tin cần thiết). |
+
+### 6.1 Công thức tính ROI (Return on Investment)
+
+Hiệu quả sinh lời của kiến trúc MCP-server RAG được đánh giá dựa trên công thức sau:
+
+$$ROI = \frac{\sum(T \times C) + \Delta R - (D + O)}{\sum(D + O)}$$
+
+**Trong đó:**
+- **T**: Thời gian tiết kiệm được (h).
+- **C**: Chi phí nhân công trung bình ($/h).
+- **$\Delta R$**: Doanh thu tăng thêm nhờ tốc độ xử lý nhanh hơn (ví dụ: luồng workflow trơn tru giúp chốt đơn/release sản phẩm nhanh hơn).
+- **D**: Chi phí phát triển & triển khai MCP-server (Capital Expenditure).
+- **O**: Chi phí vận hành như Máy chủ Cloud VPS, Tokens, v.v. (Operational Expenditure).
