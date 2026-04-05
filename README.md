@@ -110,35 +110,33 @@ sequenceDiagram
     AI-->>User: Synthesized response based on internal docs
 ```
 
-## 4. Security & Zero-Trust Posture
+## 4. Technical Stack, Modularity & Security
 
-System-wide security is enforced to prevent unauthorized access and to protect sensitive enterprise data during transport:
-- **Tailscale Mesh VPN:** Traffic between the macOS Edge node and the VPS operates exclusively within a private, encrypted Tailscale network overlay.
-- **Strict UFW Firewall Rules:** Public SSH (port 22) and all external vectors are blocked. Synchronization relies strictly on the safe `tailscale0` network interface.
-- **Certificate & Key-Based Automation:** Password authentication is completely disabled on the VPS. The chronological `sync-db.sh` scripts rely on hardened `id_ed25519` keys for secure unattended sync processes.
+The system is built on a modern AI stack and is organized to cleanly delineate heavy cloud ingestion mechanisms from the local execution service, with security engineered at every layer.
 
-## 5. Technical Stack
+### 4.1 System Modularity
+- **`vps-ingestor/rag_pipeline.py` (Heavy-Lifting):** Handles scheduled data extraction and computationally intensive vectorization on the VPS.
+- **`local-rag-mcp/server.py` (Local Execution):** Low-footprint FastMCP listener and similarity execution block on the macOS edge.
+- **`local-rag-mcp/sync.sh` (Automation):** LaunchAgent executable automating differential replication without user intervention.
 
-- **Core Integration:** Python 3.x, FastMCP Protocol framework.
-- **AI & NLP:** HuggingFace `sentence-transformers`, `BAAI/bge-m3` Model.
-- **Data Layer:** ChromaDB (Vector Search & Persistence).
-- **Core Infrastructure:** Ubuntu Server, macOS, Unix Cron, macOS LaunchAgents.
-- **Security & Networking:** Tailscale (VPN), Rsync over SSH, UFW (Uncomplicated Firewall).
-
-## 6. Architecture Modularity
-
-The repository cleanly delineates the cloud ingestion mechanisms from the local execution service:
-- `vps-ingestor/rag_pipeline.py`: Heavy-lifting module handling scheduled data extraction and computationally intensive vectorization.
-- `local-rag-mcp/server.py`: Low-footprint FastMCP listener and similarity execution block.
-- `local-rag-mcp/sync.sh`: LaunchAgent executable automating differential replication without user intervention.
-
-### Configuration Injection
+#### Configuration Injection
 ```json
 "jira-confluence-rag": {
   "command": "/path/to/MCP-server/local-rag-mcp/venv/bin/python",
   "args": ["/path/to/MCP-server/local-rag-mcp/server.py"]
 }
 ```
+
+### 4.2 Technical Stack
+- **Core & AI:** Python 3.x, FastMCP Protocol, HuggingFace (`sentence-transformers`, `BAAI/bge-m3`), ChromaDB.
+- **Infrastructure:** Ubuntu Server, macOS, Unix Cron, macOS LaunchAgents.
+- **Security & Networking:** Tailscale (VPN), Rsync over SSH, UFW (Uncomplicated Firewall).
+
+### 4.3 Zero-Trust Security Posture
+System-wide security prevents unauthorized access and protects sensitive enterprise data during transport:
+- **Tailscale Mesh VPN:** Traffic operates exclusively within a private, encrypted overlay network between the VPS and edge node.
+- **Strict UFW Firewall:** Public SSH (port 22) and external vectors are blocked; synchronization relies solely on the safe `tailscale0` interface.
+- **Certificate-Based Automation:** Password authentication is completely disabled on the VPS. Unattended `sync-db.sh` processes use hardened `id_ed25519` keys.
 
 ---
 *Developed as a technical showcase for advanced AI orchestration, context engineering, and decoupled system design.*
