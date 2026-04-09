@@ -63,6 +63,28 @@ graph TB
     LLM_Client([LLM Client]) <-->|stdio / MCP Protocol| MCP_Server
 ```
 
+### 2.2.1. Phân hệ VPS Environment (Cloud Data Ingestor)
+Phân hệ VPS đảm nhiệm vai trò trung tâm tính toán khối lượng lớn (Heavy-lifting Node). Hệ thống tự động trích xuất và biến đổi nguồn dữ liệu thô thành cơ sở dữ liệu Vector.
+
+- **Cronjob Scheduler:** Bộ lập lịch hệ thống (cron) chịu trách nhiệm kích hoạt quy trình Trích xuất, Chuyển đổi và Tải dữ liệu (ETL pipeline) vào lúc `1:00 AM` hằng ngày, tối ưu hóa băng thông ngoài giờ hành chính.
+- **Python Ingestor Script:** Module trích xuất kết nối trực tiếp với **Atlassian API** để tổng hợp tài liệu (PRD, Epic, User Story) từ nền tảng Jira và Confluence. Dữ liệu sau đó trải qua tiền xử lý, bao gồm làm sạch (sanitization) và phân mảnh (chunking).
+- **HuggingFace Embedding Model:** Lớp phân tích Xử lý Ngôn ngữ Tự nhiên (NLP). Tiến trình sử dụng mô hình tối ưu hóa nhúng đa ngôn ngữ `BAAI/bge-m3` để mã hóa và chuyển đổi văn bản sang không gian vector (Vector Semantic Space).
+- **ChromaDB Vector Database:** Cơ sở dữ liệu Vector chính lưu trữ kết quả đầu ra. Tại khâu này, ChromaDB chỉ đóng vai trò ghi và cập nhật (Write-Optimized) nhằm đảm bảo tính toàn vẹn của dữ liệu gốc.
+
+### 2.2.2. Phân hệ Local Environment (macOS Edge Node)
+Phân hệ Local biến thiết bị cuối của người dùng thành trạm biên suy luận (Edge Node), đáp ứng yêu cầu bảo mật hoàn toàn (Data Privacy) và truy vấn thời gian thực (Zero-Latency).
+
+- **macOS LaunchAgent:** Tiến trình nền (daemon) được cấu hình tự động hóa quy trình đồng bộ. Cứ mỗi 4 giờ, hệ thống kích hoạt giao thức `rsync` để tải các tệp chênh lệch (Delta changes) của Vector Database từ máy chủ VPS về máy trạm cục bộ.
+- **ChromaDB Local Mirror:** Bản sao cơ sở dữ liệu độc lập hoàn toàn tại máy trạm. Cơ chế này loại bỏ thao tác gọi DB qua mạng (Network I/O), đẩy tốc độ truy xuất ngữ cảnh lên tối đa.
+- **Python FastMCP Server:** Lõi giao tiếp tại thiết bị cuối tuân thủ tiêu chuẩn Model Context Protocol (MCP).
+    - Thay vì gửi nội dung câu hỏi về máy chủ trung tâm, quy trình Vector hóa (Vectorization) câu lệnh từ LLM sẽ được module `HuggingFace (BAAI/bge-m3)` tính toán hoàn toàn ngay tại máy Mac.
+    - Tiến hành đo lường độ tương đồng (Similarity Search) với bản **Local Mirror DB** để trích xuất ngữ cảnh.
+- **LLM Client:** Ứng dụng tích hợp AI (ví dụ: Cursor AI, Claude Desktop). Ứng dụng này khai thác trực tiếp Context Tool được FastMCP cung cấp, thực hiện phân tích luồng nghiệp vụ trên bộ vi xử lý cục bộ, tuyệt đối không rò rỉ cấu trúc dữ liệu doanh nghiệp ra bên ngoài.
+
+### 2.2.3. Lợi ích Cốt lõi của Kiến trúc
+- **Cost & Performance Optimization:** Gánh nặng xử lý dữ liệu phức tạp (Noise reduction, Embedding API cost) được dồn hoàn toàn cho VPS.
+- **Maximum Privacy:** Mô hình Edge Inference cho phép LLM tham chiếu cơ sở dữ liệu Atlassian mà không làm lộ các thông tin nội bộ (Business Security / Trade Secrets) ra môi trường Cloud công cộng. Củng cố tính bền vững của vòng lặp bảo mật.
+
 ## 3. Data Flow & Request Lifecycle
 
 ### 3.1 Nightly Data Sync & Ingestion Pipeline
