@@ -91,7 +91,7 @@ sequenceDiagram
 
     Cron->>Atlas: Fetch pages/issues từ Spaces (AIA, SUZ, AAV...)
     Atlas-->>Cron: Raw HTML / JSON
-    Note over Cron: Sanitize + chunk; gắn metadata project / title / url
+    Note over Cron: Sanitize and chunk then tag metadata project/title/url
     Cron->>OpenAI: Embed chunks (text-embedding-3-small)
     OpenAI-->>Cron: Vectors
     Cron->>Chroma: Upsert vectors + metadata vào collection company_kb
