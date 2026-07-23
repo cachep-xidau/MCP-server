@@ -22,12 +22,12 @@
   "homepage": "https://github.com/cachep-xidau/MCP-server#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
-    "better-sqlite3": "^12.8.0",
+    "chromadb": "^1.9.2",
     "dotenv": "^17.3.1",
+    "openai": "^4.67.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.5.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
