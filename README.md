@@ -108,7 +108,7 @@ sequenceDiagram
 
     Cron->>Atlas: Lấy pages/issues từ các Space
     Atlas-->>Cron: Raw HTML / JSON
-    Note over Cron: Sanitize + chunk; gắn metadata {project, title, url}
+    Note over Cron: Sanitize + chunk; gắn metadata project / title / url
     Cron->>OpenAI: Embed chunks (text-embedding-3-small)
     OpenAI-->>Cron: Vectors
     Cron->>Chroma: Upsert vectors + metadata vào collection company_kb
@@ -134,10 +134,10 @@ sequenceDiagram
         ACL-->>MCP: AclDeniedError
         MCP-->>AI: "Access denied: project 'AIA' is outside your ACL scope."
     else trong scope
-        ACL-->>MCP: { projects: ["AIA"] }
+        ACL-->>MCP: projects = AIA
         MCP->>OpenAI: Embed query
         OpenAI-->>MCP: Query vector
-        MCP->>Chroma: query(vector, where={project $in ['AIA']}, nResults=30)
+        MCP->>Chroma: query(vector, project=AIA, nResults=30)
         Chroma-->>MCP: Top-30 candidates
         MCP->>RR: rerank(query, 30 candidates)
         RR-->>MCP: Top-5 (đã xếp lại)
