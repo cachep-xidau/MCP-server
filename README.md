@@ -7,10 +7,10 @@
 
 Một Model Context Protocol (MCP) server (`DON-Workspace-MCP`) giúp LLM assistant (Claude Desktop / Cursor / Antigravity) truy cập có kiểm soát vào kho kiến thức nội bộ của công ty. Hệ thống kết hợp:
 
-- một **semantic knowledge base** — embedding bằng OpenAI **`text-embedding-3-small`** + vector search trên **ChromaDB**, giới hạn theo ACL cho từng caller; và
+- một **semantic knowledge base** — embedding bằng OpenAI **`text-embedding-3-small`** + vector search trên **ChromaDB**, rerank bằng cross-encoder **`BAAI/bge-reranker-v2-m3`** (self-host, MIT), giới hạn theo ACL cho từng caller; và
 - một **live REST hub** — các tool gọi trực tiếp Jira, Confluence, Figma khi kho offline không đủ.
 
-Server là **một process Node.js/TypeScript** chạy trên **VPS**, giao tiếp MCP qua stdio. Retrieval dùng **dense vector similarity** (semantic), hiểu được câu hỏi diễn đạt khác nhau chứ không chỉ khớp keyword.
+Server là **một process Node.js/TypeScript** chạy trên **VPS**, giao tiếp MCP qua stdio. Retrieval theo 2 tầng: **dense vector similarity** lấy top-30 candidate, rồi **cross-encoder rerank** chọn top-5 chính xác nhất.
 
 **Nguyên tắc cốt lõi:**
 - **Single source of truth:** một ChromaDB collection duy nhất trên VPS. Không local mirror, không `rsync` replica, không staleness.
@@ -54,12 +54,14 @@ C4Container
     System_Boundary(vps, "VPS") {
         Container(mcp, "DON-Workspace-MCP", "Node.js / TypeScript, stdio", "MCP tools; enforce RBAC/ACL")
         ContainerDb(chroma, "ChromaDB", "Vector store", "collection company_kb")
+        Container(reranker, "Reranker Service", "bge-reranker-v2-m3, TEI HTTP", "Cross-encoder rerank")
     }
 
     Rel(user, agent, "Trò chuyện")
     Rel(agent, mcp, "Gọi tools", "MCP stdio / Tailscale SSH")
     Rel(mcp, openai, "Embed query", "HTTPS")
-    Rel(mcp, chroma, "Vector search theo ACL where-filter")
+    Rel(mcp, chroma, "Vector search theo ACL, top-30")
+    Rel(mcp, reranker, "Rerank top-30 -> top-5", "HTTP")
     Rel(mcp, atlassian, "REST trực tiếp", "HTTPS")
     Rel(mcp, figma, "REST trực tiếp", "HTTPS")
     Rel(ingest, atlassian, "Cào dữ liệu", "HTTPS")
@@ -70,7 +72,7 @@ C4Container
 ### 2.2.1 MCP Tools
 | Tool | Nguồn | Chức năng |
 | :--- | :--- | :--- |
-| `search_company_kb` | ChromaDB + OpenAI embeddings | Semantic search theo ACL; trả top-5 `{title, snippet, url}`. |
+| `search_company_kb` | ChromaDB + OpenAI embeddings + reranker | Semantic search + rerank theo ACL; trả top-5 `{title, snippet, url}`. |
 | `get_jira_ticket` | Jira REST v3 | Lấy summary/status/description của ticket theo issue key. |
 | `search_confluence_live` | Confluence REST (CQL) | Tìm page trực tiếp khi kho offline thiếu kết quả. |
 | `get_figma_nodes` | Figma REST v1 | Lấy file components / nodes / design tokens (cắt bớt để tiết kiệm token). |
@@ -78,7 +80,7 @@ C4Container
 ### 2.2.2 Knowledge-Base Retrieval (`search_company_kb`)
 - **Embedding:** query được embed bằng OpenAI `text-embedding-3-small` (qua Chroma `embeddingFunction`) — cùng model với ingestion để vector nằm chung không gian.
 - **Vector store:** ChromaDB collection `company_kb`; mỗi item có `document` (text) + metadata `{project, title, url}`.
-- **Ranking:** dense similarity, top-5.
+- **Retrieval 2 tầng:** dense similarity lấy top-30 candidate → cross-encoder `bge-reranker-v2-m3` chấm lại → top-5. Reranker fail-open (service tắt/lỗi → giữ thứ tự vector).
 - **ACL pre-filter:** `resolveAclScope()` sinh Chroma `where: { project: { $in: [...] } }`; request ngoài scope bị từ chối, tài liệu ngoài quyền không vào tập candidate.
 
 ### 2.2.3 Access Control (RBAC / ACL) & Cấu hình
@@ -87,6 +89,7 @@ Cấu hình theo từng deployment qua env vars:
 - `ACL_ALLOWED_PROJECTS` — danh sách project key được phép; bỏ trống = không giới hạn.
 - `OPENAI_API_KEY`, `OPENAI_EMBED_MODEL` (mặc định `text-embedding-3-small`).
 - `CHROMA_URL` (mặc định `http://localhost:8000`), `CHROMA_COLLECTION` (mặc định `company_kb`).
+- `RERANKER_URL` (rerank service `bge-reranker-v2-m3`; bỏ trống = tắt rerank), `RERANK_CANDIDATES` (mặc định `30`).
 - `JIRA_HOST` / `JIRA_EMAIL` / `JIRA_API_TOKEN`, `API_KEY_FIGMA`.
 
 ### 2.2.4 Design Note — VPS-only
@@ -122,6 +125,7 @@ sequenceDiagram
     participant ACL as access-control.ts
     participant OpenAI as OpenAI Embeddings
     participant Chroma as ChromaDB
+    participant RR as Reranker (bge-reranker-v2-m3)
 
     User->>AI: "Tìm PRD Notification trong AIA"
     AI->>MCP: search_company_kb(query, project_id="AIA")
@@ -133,8 +137,10 @@ sequenceDiagram
         ACL-->>MCP: { projects: ["AIA"] }
         MCP->>OpenAI: Embed query
         OpenAI-->>MCP: Query vector
-        MCP->>Chroma: query(vector, where={project $in ['AIA']}, nResults=5)
-        Chroma-->>MCP: Top-5 (document, metadata)
+        MCP->>Chroma: query(vector, where={project $in ['AIA']}, nResults=30)
+        Chroma-->>MCP: Top-30 candidates
+        MCP->>RR: rerank(query, 30 candidates)
+        RR-->>MCP: Top-5 (đã xếp lại)
         MCP-->>AI: Markdown context + citations
         AI-->>User: Câu trả lời đã tổng hợp
     end
@@ -223,7 +229,7 @@ So sánh giữa tìm kiếm trực tiếp thủ công (Direct Search / Single Sk
 
 | Tiêu chí đánh giá | Direct Search / Single Skills | KB + Workflow (MCP-server) |
 | :--- | :--- | :--- |
-| **Context Precision** | Trung bình. Tra keyword thủ công qua nhiều tool. | **Cao.** Dense vector search hiểu ngữ nghĩa; top-5 kết quả liên quan nhất. |
+| **Context Precision** | Trung bình. Tra keyword thủ công qua nhiều tool. | **Rất cao.** Dense vector search + cross-encoder rerank chọn top-5 chính xác nhất. |
 | **Fuzzy / Paraphrased Queries** | Thấp. Trượt nếu không đúng keyword. | **Cao.** Embedding hiểu ý định dù diễn đạt khác nhau. |
 | **Access Governance** | Không có. User xem mọi thứ họ mở được. | **Có enforce.** RBAC/ACL pre-filter (Chroma `where`) giới hạn kết quả về đúng project được phép. |
 | **Automation Rate** | ~30% - 40% (phải lọc/nối/switch thủ công). | **~85% - 90%** (context tự động đưa vào analysis pipeline). |

@@ -2,6 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { resolveAclScope, AclDeniedError } from "../security/access-control.js";
 import { searchKb } from "../kb/vector-store.js";
+import { rerank } from "../kb/reranker.js";
+
+// Vector-search candidate pool, reranked down to the final result count.
+const CANDIDATE_K = Number(process.env.RERANK_CANDIDATES || "30");
+const FINAL_K = 5;
 
 export function setupSearchTool(server: McpServer) {
   server.tool(
@@ -29,8 +34,10 @@ export function setupSearchTool(server: McpServer) {
           throw err;
         }
 
-        // Vector-search ChromaDB (OpenAI embeddings) restricted to the ACL scope.
-        const hits = await searchKb(query, scope.projects, 5);
+        // Vector-search ChromaDB (OpenAI embeddings) restricted to the ACL scope,
+        // then rerank the candidate pool down to the final results.
+        const candidates = await searchKb(query, scope.projects, CANDIDATE_K);
+        const hits = await rerank(query, candidates, FINAL_K);
 
         if (hits.length === 0) {
           return {
