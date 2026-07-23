@@ -1,6 +1,6 @@
-# DON Workspace MCP Server: BM25 Knowledge Base + Atlassian/Figma REST Hub
+# DON Workspace Knowledge Hub
 
-**Ngày:** March 2026 (cập nhật July 2026)
+**Ngày:** March 2026
 **Repository:** [MCP-server](https://github.com/cachep-xidau/MCP-server.git)
 
 ## 1. Executive Summary
