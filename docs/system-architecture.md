@@ -1,144 +1,128 @@
-# System Architecture: Decoupled RAG MCP Server
+# System Architecture: DON Workspace MCP Server
 
-Tài liệu này mô tả kiến trúc tổng thể, sơ đồ luồng dữ liệu (Data Flow) và trình tự tương tác (Sequence Diagram) của dự án **Decoupled RAG MCP Server** cho phép kết hợp tài liệu nội bộ Jira/Confluence vào trình LLM Assistant (Antigravity/Cursor) thông qua môi trường Model Context Protocol (MCP).
+Tài liệu mô tả kiến trúc, luồng dữ liệu và trình tự tương tác của **DON-Workspace-MCP** — một MCP server (Node.js/TypeScript) đưa tài liệu nội bộ Jira/Confluence và thiết kế Figma vào LLM Assistant (Claude Desktop/Cursor/Antigravity) qua giao thức Model Context Protocol (MCP).
+
+> **Bản chất hệ thống:** tìm kiếm từ khóa **SQLite FTS5 + BM25** trên một `remote-rag.db` dựng sẵn (ACL-scoped), cộng các tool REST gọi trực tiếp Jira/Confluence/Figma. **Không** dùng vector/embedding trong bản hiện tại — semantic là nâng cấp tương lai (xem README §5). Toàn bộ chạy trên **VPS** (single source of truth).
 
 ---
 
-## 1. C4 Model: System Context Diagram
-Mô tả bức tranh toàn cảnh về cách người dùng, hệ thống RAG và các dịch vụ bên ngoài kết nối với nhau.
+## 1. C4: System Context
 
 ```mermaid
 graph TD
-    %% Nút người và hệ thống
-    User((Người dùng\nLocal Mac))
-    Antigravity(Claude Desktop /\nAntigravity)
-    RAG_System["Decoupled RAG System\n(MCP Server + VPS Ingestor)"]
+    User((Người dùng / BA))
+    Agent(Claude Desktop /\nCursor / Antigravity)
+    MCP["DON-Workspace-MCP\n(VPS · Node/TS · stdio)"]
+    KB[(remote-rag.db\nSQLite FTS5/BM25)]
     Atlassian[(Atlassian Cloud\nJira/Confluence)]
-    HuggingFace[(HuggingFace\nModels Hub)]
+    Figma[(Figma API)]
 
-    %% Liên kết
-    User -->|Chat, Yêu cầu phân tích PRD| Antigravity
-    Antigravity -->|Gọi Tools qua giao thức MCP| RAG_System
-    RAG_System -->|Cào dữ liệu Wiki/Ticket định kỳ| Atlassian
-    RAG_System -->|Tải Model BAAI/bge-m3| HuggingFace
+    User -->|Chat, yêu cầu phân tích| Agent
+    Agent -->|Gọi Tools qua MCP stdio| MCP
+    MCP -->|Tìm kiếm BM25 theo ACL| KB
+    MCP -->|REST fallback trực tiếp| Atlassian
+    MCP -->|Nodes / design tokens| Figma
 
     classDef person fill:#08427b,color:#fff,stroke:#052e56
     classDef sys fill:#1168bd,color:#fff,stroke:#0b4884
     classDef ext fill:#999999,color:#fff,stroke:#666666
-    
+
     class User person;
-    class Antigravity,RAG_System sys;
-    class Atlassian,HuggingFace ext;
+    class Agent,MCP sys;
+    class KB,Atlassian,Figma ext;
 ```
 
 ---
 
-## 2. C4 Model: Container Diagram
-Cắt lớp hệ thống RAG (RAG_System) ra thành các Container chức năng cụ thể chạy trên 2 môi trường tách biệt: **Máy chủ từ xa (VPS)** và **Máy cá nhân (Local Mac)** để giải quyết bài toán hiệu năng (OOM) và độ trễ.
+## 2. C4: Container
+
+Toàn bộ chạy trên **VPS**. Một job ingestion (ngoài repo này) dựng định kỳ `remote-rag.db`; MCP server đọc DB đó và mở thêm các tool REST live.
 
 ```mermaid
 graph TB
-    subgraph "VPS Environment (Ubuntu Server)"
-        Cron[Cronjob Scheduler\n(Linux)]
-        Ingestor[Python Ingestor Script\nrag_pipeline.py]
-        HF_Model_VPS[HuggingFace Model\nBAAI/bge-m3]
-        DB_VPS[(ChromaDB\nVector Database)]
-        
-        Cron -->|Trigger 1:00 AM| Ingestor
-        Ingestor -->|Init & Embed Text| HF_Model_VPS
-        Ingestor -->|Save Vectors| DB_VPS
+    subgraph "VPS (Ubuntu) — Single Source of Truth"
+        subgraph "DON-Workspace-MCP (Node.js/TS, stdio)"
+            Search[search_company_kb\nFTS5 + BM25]
+            ACL[access-control.ts\nRBAC/ACL scope]
+            Jira[get_jira_ticket\nREST]
+            Conf[search_confluence_live\nREST/CQL]
+            Figma[get_figma_nodes\nREST]
+        end
+        DB[(remote-rag.db\nSQLite: pages + pages_fts)]
+        Ingest[Ingestion job (external)\ncron -> build DB]
+
+        Search -->|resolveAclScope| ACL
+        ACL -->|WHERE p.project IN scope| DB
+        Search -->|bm25 top-5 + snippet| DB
+        Ingest -->|populate pages + FTS index| DB
     end
 
-    subgraph "Local Environment (macOS)"
-        SyncAgent[macOS LaunchAgent\ncom.company.ragsync]
-        DB_Local[(ChromaDB\nLocal Mirror)]
-        MCP_Server[Python FastMCP Server\nserver.py]
-        HF_Model_Local[HuggingFace Model\nBAAI/bge-m3]
-        
-        SyncAgent -->|Rsync Pull (mỗi 4h)| DB_VPS
-        SyncAgent -->|Update| DB_Local
-        MCP_Server -->|Read Vectors| DB_Local
-        MCP_Server -->|Embed User Query| HF_Model_Local
-    end
-
-    %% Giao tiếp giữa 2 hệ thống và bên ngoài
-    Atlassian_Ext([Atlassian API]) -->|Fetch Data| Ingestor
-    LLM_Client([LLM Client]) <-->|stdio / MCP Protocol| MCP_Server
+    Atlas([Atlassian API]) -->|nightly scrape| Ingest
+    Atlas -->|live query| Jira
+    Atlas -->|live query| Conf
+    FigmaExt([Figma API]) -->|live query| Figma
+    LLM([LLM Client]) <-->|MCP stdio, tunneled qua Tailscale SSH| Search
 
     classDef container fill:#438dd5,color:#fff
     classDef db fill:#f2a74c,color:#fff
-    
-    class Ingestor,MCP_Server,SyncAgent,Cron container;
-    class DB_VPS,DB_Local,HF_Model_VPS,HF_Model_Local db;
+    class Search,ACL,Jira,Conf,Figma,Ingest container;
+    class DB db;
 ```
 
 ---
 
-## 3. Sequence Diagram (Data Sync & Ingestion Flow)
-Mô tả quy trình chạy nền (Background Process) diễn ra hàng đêm trên VPS nhằm cập nhật kho dữ liệu mà **không làm chậm máy tính của người dùng**.
+## 3. Sequence: Ingestion (external job dựng KB)
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Mac as Local MacOS (SyncAgent)
-    participant VPS as VPS Server (Cronjob)
-    participant Model as HuggingFace (bge-m3)
+    participant Cron as VPS Cron (ingestion)
     participant Atlas as Atlassian (Confluence/Jira)
-    
-    VPS->>Atlas: Request toàn bộ pages từ Spaces (SUZUCC, AE, CA1...)
-    Atlas-->>VPS: Trả về Raw HTML / JSON
-    
-    Note over VPS: Chunking: Cắt văn bản thành mảnh nhỏ (Recursive Splitter)
-    
-    VPS->>Model: Tải Model BAAI/bge-m3 (Nếu chưa Cache)
-    Model-->>VPS: Models Weights (2.2GB - Load vào RAM/Swap)
-    
-    Note over VPS: Embedding: Chuyển đổi hàng ngàn chunks thành Vector Mảng
-    VPS->>VPS: Lưu chuỗi Vector xuống thư mục chroma_db/ (75MB)
-    
-    loop Cứ mỗi 4 Tiếng (Background)
-        Mac->>VPS: Gọi lệnh Rsync qua SSH
-        VPS-->>Mac: Transmit các file thay đổi (Delta sync) của ChromaDB
-        Mac->>Mac: Cập nhật thư mục chroma_db dưới Local
-    end
+    participant DB as remote-rag.db (SQLite)
+
+    Cron->>Atlas: Fetch pages/issues từ Spaces (AIA, SUZ, AAV...)
+    Atlas-->>Cron: Raw HTML / JSON
+    Note over Cron: Sanitize + upsert vào 'pages' (title, url, project, ...)
+    Cron->>DB: Rebuild FTS5 index 'pages_fts'
 ```
+
+> Job ingestion tạo `remote-rag.db` vận hành trên VPS và **không thuộc repo này**; MCP server chỉ tiêu thụ database.
 
 ---
 
-## 4. Sequence Diagram (RAG Query Flow)
-Luồng tương tác theo thời gian thực (Real-time) ngay khi người dùng trò chuyện với Trợ lý AI trên máy tính cá nhân.
+## 4. Sequence: Governed KB Query (RBAC/ACL + BM25)
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor User as Người dùng
-    participant AI as Antigravity (LLM)
-    participant MCP as Python MCP Server (Local)
-    participant LB_Model as Local Model (bge-m3)
-    participant DB as Local ChromaDB
-    
-    User->>AI: "Hãy tìm PRD về Notification ở AE"
-    
-    Note over AI: LLM tự nhận diện Intent và quyết định gọi MCP Tool
-    AI->>MCP: Call tool: search_agile_docs(query="Notification rules AE")
-    
-    MCP->>LB_Model: Gửi câu truy vấn dạng Text
-    LB_Model-->>MCP: Trả về Query Vector (Ma trận nhúng)
-    
-    MCP->>DB: Truy vấn tương đồng (Similarity Search K=5) bằng Vector
-    DB-->>MCP: Trả về Top 5 văn bản liên quan nhất (Context chunks)
-    
-    MCP-->>AI: Trả về Markdown String (Kèm URL Source & Title)
-    
-    Note over AI: LLM đọc hiểu Context truyền vào
-    AI-->>User: "Dựa vào tài liệu, tính năng Notification yêu cầu..."
+    participant AI as LLM Agent
+    participant MCP as DON-Workspace-MCP (VPS)
+    participant ACL as access-control.ts
+    participant DB as remote-rag.db
+
+    User->>AI: "Tìm PRD Notification ở AIA"
+    AI->>MCP: search_company_kb(keywords, project_id="AIA")
+    MCP->>ACL: resolveAclScope("AIA")
+    alt project ngoài ACL scope
+        ACL-->>MCP: AclDeniedError
+        MCP-->>AI: "Access denied: project 'AIA' is outside your ACL scope."
+    else trong scope
+        ACL-->>MCP: { projects: ["AIA"] }
+        MCP->>DB: FTS5 MATCH + WHERE p.project IN ('AIA') ORDER BY bm25 LIMIT 5
+        DB-->>MCP: Top-5 (title, snippet, url)
+        MCP-->>AI: Markdown context + citations
+        AI-->>User: Câu trả lời tổng hợp
+    end
 ```
 
 ---
 
 ## 5. Danh mục Công nghệ Cốt lõi
-*   **Vector Engine**: `ChromaDB` (Mã nguồn mở, chạy Local, hỗ trợ Persist ra file DB vật lý).
-*   **Embeddings Model**: `BAAI/bge-m3` (Top 1 Model Semantic Search đa ngôn ngữ của HuggingFace, ưu việt cho Tiếng Việt).
-*   **Orchestration Framework**: `Langchain` (Quản lý Text Splitter, Document Loading, HuggingFace Integration).
-*   **MCP Protocol Bridge**: `mcp.server.fastmcp` (Tạo StdIO Server chuẩn hóa để Claude/Antigravity tiếp nhận dưới dạng Function Calling).
-*   **Infrastructure**: `Shell Script`, `Cron`, `macOS LaunchAgents`, `Linux Swap Optimization`.
+
+- **MCP Bridge:** `@modelcontextprotocol/sdk` (StdioServerTransport) — chuẩn hóa tools dưới dạng function calling cho Claude/Cursor.
+- **Knowledge Base:** `SQLite` qua `better-sqlite3`, index **FTS5** + xếp hạng **BM25** (`remote-rag.db`, mở readonly).
+- **Access Control:** RBAC/ACL SQL pre-filter (`src/security/access-control.ts`) — `RBAC_ROLE`, `ACL_ALLOWED_PROJECTS`.
+- **REST Hub:** Jira REST v3, Confluence REST/CQL, Figma REST v1 (`fetch`, `zod` schema).
+- **Infra & Security:** Node.js/TypeScript, Ubuntu VPS, Unix Cron (ingestion ngoài repo), Tailscale VPN, UFW, SSH/Ed25519.
+- **Tương lai (chưa triển khai):** embeddings `BAAI/bge-m3` (dense+sparse), hybrid retrieval, cross-encoder rerank `BAAI/bge-reranker-v2-m3` — xem README §5.

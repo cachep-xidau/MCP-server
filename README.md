@@ -1,186 +1,198 @@
-# Secure RAG MCP Server: Hybrid Retrieval + Reranking with RBAC/ACL
+# DON Workspace MCP Server: BM25 Knowledge Base + Atlassian/Figma REST Hub
 
 **Date:** March 2026 (updated July 2026)
 **Repository:** [MCP-server](https://github.com/cachep-xidau/MCP-server.git)
 
 ## 1. Executive Summary
 
-A Model Context Protocol (MCP) server providing governed Semantic RAG over Figma, Jira, and Confluence. A **single VPS** owns the full lifecycle — ingestion, indexing, and serving — behind one authoritative ChromaDB (single source of truth). Retrieval quality is driven by **hybrid search (dense + sparse) + cross-encoder reranking**, and every query is gated by **RBAC/ACL** so users only ever see documents they are permitted to see.
+A Model Context Protocol (MCP) server (`DON-Workspace-MCP`) that gives an LLM assistant (Claude Desktop / Cursor / Antigravity) grounded access to internal company knowledge. It combines:
 
-**Key Architectural Principles:**
-- **Single source of truth:** one ChromaDB on the VPS. No local mirror, no `rsync` replica, no split-brain / staleness window (zero-latency edge topology intentionally dropped — see §2.3).
-- **Quality-first retrieval:** hybrid recall → ACL pre-filter → cross-encoder rerank → top-5 (precision over raw cosine top-K).
-- **Governed access:** RBAC (role → allowed data domains/tools) + ACL (per-document space/project permissions) enforced *before* similarity search.
-- **Zero-Trust transport:** Tailscale mesh VPN + UFW + Ed25519 key-based automation.
+- an **offline keyword knowledge base** — SQLite **FTS5 + BM25** full-text search over a pre-built `remote-rag.db`, ACL-scoped per caller; and
+- a **live REST hub** — on-demand tools that call Jira, Confluence, and Figma directly when the offline base is insufficient.
+
+The server is a **single Node.js/TypeScript process** that runs on the **VPS** (single source of truth) and speaks MCP over stdio. There is no embedding model and no vector database in the current implementation — retrieval is lexical BM25. Semantic vector search is a documented future upgrade (§5).
+
+**Key principles:**
+- **Single source of truth:** one `remote-rag.db` on the VPS, read in place. No local mirror, no `rsync` replica, no staleness window.
+- **Governed access:** RBAC/ACL pre-filtering restricts every KB query to the caller's permitted projects, in SQL, before results are returned.
+- **Token-frugal:** `snippet()` returns short matched excerpts; `LIMIT 5` caps context injected into the LLM.
+- **Zero-Trust transport:** Tailscale mesh VPN + UFW + Ed25519 keys.
 
 ## 2. Architecture & Topology
 
-The system runs entirely on the **VPS**, split into two logical pipelines that share one ChromaDB:
-
-1. **Ingestion Pipeline (nightly + delta):** a cron pipeline scrapes Atlassian (Jira/Confluence), chunks and sanitizes text, **captures source ACL metadata** (space keys, project roles, restriction labels), embeds with `BAAI/bge-m3` (dense + sparse), and upserts deltas keyed by content-hash.
-2. **Serving Pipeline (MCP):** a FastMCP server resolves the caller's role/ACL scope, runs a hybrid retrieve constrained to permitted documents, reranks candidates with `BAAI/bge-reranker-v2-m3`, and returns the top-5 chunks with citations. AI clients connect over Tailscale via MCP.
+Everything runs on the **VPS**. A background ingestion job (external to this repo) periodically builds `remote-rag.db` from Atlassian; the MCP server reads that database and also exposes live REST tools.
 
 ### 2.1 Context Diagram
 ```mermaid
 graph TD
     User((BA / User))
-    Agent(AI Agent - Claude Code / Cursor)
-    RAG_System[Secure RAG MCP System - VPS]
-    Atlassian[(Atlassian Cloud)]
-    HuggingFace[(HuggingFace Models Hub)]
-    IdP[(Identity / Role Source)]
+    Agent(AI Agent - Claude Desktop / Cursor)
+    MCP[DON-Workspace-MCP - VPS - Node/TS, stdio]
+    KB[(remote-rag.db - SQLite FTS5/BM25)]
+    Atlassian[(Atlassian Cloud - Jira / Confluence)]
+    Figma[(Figma API)]
 
-    User -->|Chat / Request Analysis| Agent
-    Agent -->|Invoke tools via MCP + user identity| RAG_System
-    RAG_System -->|Scheduled scraping + ACL metadata| Atlassian
-    RAG_System -->|bge-m3 + bge-reranker-v2-m3| HuggingFace
-    RAG_System -->|Resolve role / allowed scopes| IdP
+    User -->|Chat / analysis request| Agent
+    Agent -->|Invoke MCP tools over stdio| MCP
+    MCP -->|ACL-scoped BM25 search| KB
+    MCP -->|Live REST fallback| Atlassian
+    MCP -->|Design nodes / tokens| Figma
 ```
 
 ### 2.2 Container Diagram
 ```mermaid
 graph TB
     subgraph VPS["VPS Environment (Ubuntu) - Single Source of Truth"]
-        subgraph ING["Ingestion Pipeline (nightly + delta)"]
-            Cron[Cronjob Scheduler]
-            Ingestor[Ingestor + Chunker + ACL Tagger]
-            Embedder[BGE-M3 Embedder<br/>dense + sparse]
+        subgraph MCPProc["DON-Workspace-MCP (Node.js / TypeScript, stdio)"]
+            Search["search_company_kb<br/>FTS5 + BM25"]
+            ACL["access-control.ts<br/>RBAC/ACL scope filter"]
+            Jira["get_jira_ticket<br/>REST"]
+            Conf["search_confluence_live<br/>REST / CQL"]
+            Figma["get_figma_nodes<br/>REST"]
         end
-        DB[(ChromaDB<br/>dense + sparse + metadata + ACL)]
-        subgraph SRV["Serving Pipeline (MCP)"]
-            MCP[FastMCP Server]
-            RBAC[RBAC / ACL Resolver]
-            Retriever[Hybrid Retriever<br/>top-K = 30]
-            Reranker[Reranker<br/>bge-reranker-v2-m3]
-        end
+        DB[(remote-rag.db<br/>SQLite: pages + pages_fts)]
+        Ingest["Ingestion job (external)<br/>cron, builds remote-rag.db"]
 
-        Cron -->|Trigger 1:00 AM + delta| Ingestor
-        Ingestor -->|chunks + ACL metadata| Embedder
-        Embedder -->|upsert by content-hash| DB
-        MCP -->|user identity| RBAC
-        RBAC -->|allowed spaces / projects| Retriever
-        Retriever -->|hybrid search + WHERE acl filter| DB
-        Retriever -->|30 candidates| Reranker
-        Reranker -->|top-5 + citations| MCP
+        Search -->|resolve scope| ACL
+        ACL -->|WHERE p.project IN scope| DB
+        Search -->|bm25 top-5 + snippet| DB
+        Ingest -->|populate pages + FTS index| DB
     end
 
-    Atlassian([Atlassian API]) -->|Fetch docs + permissions| Ingestor
-    IdP([Identity / Role Source]) -->|role, group membership| RBAC
-    LLM([AI Agent / LLM Client]) <-->|MCP over Tailscale| MCP
+    Atlas([Atlassian API]) -->|nightly scrape| Ingest
+    Atlas -->|live query| Jira
+    Atlas -->|live query| Conf
+    FigmaExt([Figma API]) -->|live query| Figma
+    LLM([AI Agent / LLM Client]) <-->|MCP over stdio, tunneled via Tailscale SSH| MCPProc
 ```
 
-### 2.2.1 Ingestion Pipeline (VPS)
-Transforms raw Atlassian sources into a governed vector index.
+### 2.2.1 MCP Tools
+| Tool | Source | Purpose |
+| :--- | :--- | :--- |
+| `search_company_kb` | SQLite `remote-rag.db` | ACL-scoped FTS5/BM25 keyword search; returns top-5 `{title, snippet, url}`. |
+| `get_jira_ticket` | Jira REST v3 | Fetch a ticket's summary/status/description by issue key. |
+| `search_confluence_live` | Confluence REST (CQL) | Live page search when the offline base lacks results. |
+| `get_figma_nodes` | Figma REST v1 | Fetch file components / nodes / design tokens (truncated to limit tokens). |
 
-- **Cronjob Scheduler:** triggers the ETL pipeline at `1:00 AM` daily (off-peak). Between full runs, delta re-indexing is keyed by **content-hash** so unchanged chunks are skipped.
-- **Ingestor + Chunker + ACL Tagger:** pulls PRDs, Epics, and User Stories from Jira/Confluence; sanitizes and chunks; and tags each chunk with metadata `{source, space, project, acl_groups, restriction_labels, updated_at}`. **Source permissions travel with the document** — this is what makes downstream ACL filtering possible.
-- **BGE-M3 Embedder:** encodes each chunk into **both dense and sparse (lexical) vectors** in a single pass. `bge-m3` natively supports dense + sparse retrieval, so hybrid search needs no second embedding model.
-- **ChromaDB:** the single authoritative store, holding hybrid vectors + metadata + ACL fields.
+### 2.2.2 Knowledge-Base Retrieval (`search_company_kb`)
+- **Store:** SQLite `remote-rag.db` with an FTS5 external-content table `pages_fts` over a base `pages` table (`id, title, url, project, ...`).
+- **Ranking:** BM25 (`ORDER BY bm25(pages_fts)`), `LIMIT 5`. Query is an FTS5 string; the tool encourages OR-synonym expansion for recall (`"login OR sign-in OR oauth"`).
+- **ACL pre-filter:** `resolveAclScope()` (in `src/security/access-control.ts`) turns the caller's env-provisioned scope into a `WHERE p.project IN (...)` clause. Out-of-scope `project_id` requests are denied; restricted rows never enter the result set. Requires a `project` column populated at ingestion.
+- **Read-only:** the DB is opened `readonly`, lazily, so the server boots even if the DB is absent.
 
-### 2.2.2 Serving Pipeline (VPS, MCP)
-Answers queries with precision and permission enforcement.
+### 2.2.3 Access Control (RBAC / ACL)
+Provisioned per deployment via environment variables (one host = one caller identity):
+- `RBAC_ROLE` — caller role (e.g. `ba`, `hr`, `admin`); reserved for role-aware tool gating.
+- `ACL_ALLOWED_PROJECTS` — comma-separated permitted project keys (e.g. `AIA,SUZ,AAV`). Unset = unrestricted (single-tenant/dev default; production should always set it).
 
-- **FastMCP Server:** the MCP interface. Tools (e.g. `search_docs`) receive the query **plus the caller's identity**.
-- **RBAC / ACL Resolver:** resolves the caller's role → allowed data domains/tools (RBAC), and expands group membership → allowed spaces/projects (ACL). Produces a metadata scope filter.
-- **Hybrid Retriever:** embeds the query with `bge-m3` (dense + sparse) and runs similarity search **constrained by the ACL `WHERE` filter** — restricted chunks never enter the candidate set (pre-filtering, not post-filtering). Returns top-K = 30 for recall.
-- **Reranker (`bge-reranker-v2-m3`):** a cross-encoder that re-scores the 30 permitted candidates against the query and keeps the top-5. This is the primary precision lever versus raw cosine top-K.
-- **AI Client:** Claude Code / Cursor / Claude Desktop hook the MCP tool over Tailscale. Enterprise data stays inside the private overlay network.
+### 2.2.4 Design Note — VPS-only (edge mirror removed)
+An earlier design ran a local macOS ChromaDB/SQLite mirror synced every 4 hours via `rsync` (`scripts/sync-db.sh`) for "zero-latency" edge queries. It was removed:
+- **Staleness/split-brain:** up to 4h drift between VPS and mirror.
+- **Redundant work & fragility:** full-DB replication over cron+SSH for a latency win that a Tailscale round-trip already makes negligible for a KB workload.
 
-### 2.2.3 Core Benefits
-- **Higher answer precision:** hybrid recall + cross-encoder rerank cut noise and irrelevant chunks well below plain vector top-K.
-- **Least-privilege by construction:** ACL pre-filtering guarantees a user cannot retrieve — or leak into an LLM prompt — any document their Atlassian permissions would deny.
-- **Operational simplicity:** one node, one database. No replication daemon, no sync lag, no dual-model footprint to keep consistent.
+The server now reads `remote-rag.db` in place on the VPS; clients connect by launching it over Tailscale SSH stdio (see §4 config).
 
-### 2.3 Design Note — Why the Edge Mirror Was Removed
-The earlier design ran a local macOS ChromaDB mirror synced every 4 hours via `rsync` for "zero-latency" edge queries. It was dropped deliberately:
-- **Split-brain / staleness:** up to 4h of drift between VPS and mirror.
-- **Redundant work:** full-DB replication re-shipped unchanged data; dual `bge-m3` load on both nodes.
-- **Fragility:** LaunchAgent + rsync-over-SSH added moving parts for a latency win that a Tailscale round-trip already makes negligible for a knowledge-base workload.
+## 3. Data Flow
 
-Zero-latency is explicitly **out of scope**; correctness, freshness, and access governance are prioritized instead.
-
-## 3. Data Flow & Request Lifecycle
-
-### 3.1 Nightly + Delta Ingestion Pipeline
+### 3.1 Ingestion (external job builds the KB)
 ```mermaid
 sequenceDiagram
     autonumber
-    participant VPS as VPS Ingestor
-    participant Atlas as Atlassian (DataSource)
-    participant Model as BGE-M3 (dense+sparse)
-    participant DB as ChromaDB
+    participant Cron as VPS Cron (ingestion)
+    participant Atlas as Atlassian
+    participant DB as remote-rag.db (SQLite)
 
-    VPS->>Atlas: Request pages/issues + space/project permissions
-    Atlas-->>VPS: Raw payload + ACL metadata
-    Note over VPS: Chunk + sanitize + tag {source, space, project, acl_groups, updated_at}
-    VPS->>Model: Embed chunks (dense + sparse)
-    Model-->>VPS: Hybrid vectors
-    VPS->>DB: Upsert delta by content-hash (vectors + metadata + ACL)
+    Cron->>Atlas: Fetch pages/issues from Spaces
+    Atlas-->>Cron: Raw HTML / JSON
+    Note over Cron: Sanitize + upsert rows into 'pages' (title, url, project, ...)
+    Cron->>DB: Rebuild FTS5 index 'pages_fts'
 ```
+> The ingestion job that produces `remote-rag.db` is operated on the VPS and is **not part of this repository**; the MCP server only consumes the database.
 
-### 3.2 Governed RAG Query (RBAC/ACL + Rerank)
+### 3.2 Governed KB Query (RBAC/ACL + BM25)
 ```mermaid
 sequenceDiagram
     autonumber
     actor User as User
     participant AI as AI Agent (LLM)
-    participant MCP as FastMCP Server (VPS)
-    participant RBAC as RBAC/ACL Resolver
-    participant Ret as Hybrid Retriever
-    participant DB as ChromaDB
-    participant RR as Reranker (bge-reranker-v2-m3)
+    participant MCP as DON-Workspace-MCP (VPS)
+    participant ACL as access-control.ts
+    participant DB as remote-rag.db
 
-    User->>AI: "Search PRD for Notification Feature"
-    Note over AI: Detects intent -> routes via MCP
-    AI->>MCP: Execute tool: search_docs(query, user_id)
-    MCP->>RBAC: Resolve role + group membership
-    RBAC-->>MCP: Allowed spaces/projects (ACL scope)
-    MCP->>Ret: query + BGE-M3 embed (dense + sparse)
-    Ret->>DB: Hybrid search WHERE acl IN scope (top-30)
-    DB-->>Ret: 30 permitted candidates
-    Ret->>RR: rerank(query, 30 candidates)
-    RR-->>MCP: Top-5 chunks + citations
-    MCP-->>AI: Markdown context (permitted docs only)
-    Note over AI: Contextual synthesis
-    AI-->>User: Synthesized response based on internal docs
+    User->>AI: "Find the Notification PRD in AIA"
+    AI->>MCP: search_company_kb(keywords, project_id="AIA")
+    MCP->>ACL: resolveAclScope("AIA")
+    alt project outside ACL scope
+        ACL-->>MCP: AclDeniedError
+        MCP-->>AI: "Access denied: project 'AIA' is outside your ACL scope."
+    else in scope
+        ACL-->>MCP: { projects: ["AIA"] }
+        MCP->>DB: FTS5 MATCH + WHERE p.project IN ('AIA') ORDER BY bm25 LIMIT 5
+        DB-->>MCP: Top-5 rows (title, snippet, url)
+        MCP-->>AI: Markdown context + citations
+        AI-->>User: Synthesized answer
+    end
 ```
 
 ## 4. Technical Stack, Modularity & Security
 
-A single-node AI service with a clean split between the ingestion pipeline and the serving pipeline, secured at transport and access layers.
-
 ### 4.1 System Modularity
-- **`vps-ingestor/rag_pipeline.py` (Ingestion):** scheduled extraction, ACL tagging, and dense+sparse vectorization.
-- **`vps-rag-mcp/server.py` (Serving):** FastMCP listener wiring RBAC/ACL resolution → hybrid retrieve → rerank.
-- **`vps-rag-mcp/rbac.py` (Access Control):** role → tool/domain mapping (RBAC) and group → space/project expansion (ACL); emits the ChromaDB metadata filter.
-- **`vps-rag-mcp/retriever.py` (Retrieval):** hybrid dense+sparse search + `bge-reranker-v2-m3` cross-encoder reranking.
+- **`src/index.ts`** — MCP server bootstrap; registers all tools; stdio transport.
+- **`src/tools/search_kb.ts`** — FTS5/BM25 KB search with ACL pre-filter.
+- **`src/security/access-control.ts`** — RBAC/ACL scope resolution and denial.
+- **`src/tools/jira.ts` / `confluence.ts` / `figma.ts`** — live REST hub connectors.
 
-> Removed vs. previous design: `local-rag-mcp/sync.sh` (LaunchAgent replication) and the local ChromaDB mirror are no longer part of the system.
+> Removed vs. previous design: `scripts/sync-db.sh` and the local mirror.
 
-#### Configuration Injection
+#### Configuration Injection (VPS-only via Tailscale SSH)
 ```json
-"jira-confluence-rag": {
-  "command": "/path/to/MCP-server/vps-rag-mcp/venv/bin/python",
-  "args": ["/path/to/MCP-server/vps-rag-mcp/server.py"]
+"don-workspace-rag": {
+  "command": "ssh",
+  "args": [
+    "vps-tailscale-host",
+    "DB_PATH=/opt/don-architecture/remote-rag.db",
+    "ACL_ALLOWED_PROJECTS=AIA,SUZ,AAV",
+    "RBAC_ROLE=ba",
+    "node", "/opt/MCP-server/build/index.js"
+  ]
 }
 ```
 
+#### Environment Variables
+| Variable | Used by | Purpose |
+| :--- | :--- | :--- |
+| `DB_PATH` | search_company_kb | Path to `remote-rag.db` (default: CWD). |
+| `RBAC_ROLE` | access-control | Caller role (informational / future gating). |
+| `ACL_ALLOWED_PROJECTS` | access-control | Comma-separated permitted project keys. |
+| `JIRA_HOST`, `JIRA_EMAIL`, `JIRA_API_TOKEN` | jira / confluence | Atlassian REST auth. |
+| `API_KEY_FIGMA` | figma | Figma REST token. |
+
 ### 4.2 Technical Stack
-- **Core & AI:** Python 3.x, FastMCP Protocol, HuggingFace (`sentence-transformers`), `BAAI/bge-m3` (dense+sparse embedding), `BAAI/bge-reranker-v2-m3` (cross-encoder rerank), ChromaDB.
-- **Infrastructure:** Ubuntu Server, Unix Cron.
-- **Access & Security:** RBAC/ACL scope filtering, Tailscale (VPN), UFW (firewall), SSH/Ed25519.
+- **Core:** Node.js, TypeScript, `@modelcontextprotocol/sdk` (stdio transport), `zod` (tool schemas), `dotenv`.
+- **Knowledge base:** SQLite via `better-sqlite3`, FTS5 + BM25 ranking.
+- **Infrastructure:** Ubuntu VPS, Unix Cron (external ingestion).
+- **Access & Security:** RBAC/ACL SQL pre-filter, Tailscale (VPN), UFW (firewall), SSH/Ed25519.
 
 ### 4.3 Security & Access Posture
-- **RBAC (Role-Based Access Control):** a caller's role determines which tools and data domains are reachable (e.g. BA vs HR scope).
-- **ACL (Access Control List):** each chunk carries its source Atlassian permissions; queries are **pre-filtered** to the caller's allowed spaces/projects before similarity search, so restricted content never reaches retrieval or the LLM prompt.
-- **Tailscale Mesh VPN:** all traffic stays inside a private encrypted overlay; MCP clients reach the VPS over `tailscale0`.
-- **Strict UFW Firewall:** public SSH (port 22) and external vectors blocked; access limited to the Tailscale interface.
-- **Certificate-Based Automation:** password auth disabled on the VPS; unattended jobs use hardened `id_ed25519` keys.
+- **ACL pre-filter:** KB rows restricted to the caller's permitted projects in SQL, before results leave the server.
+- **Read-only DB:** the KB is opened `readonly`; tools never mutate it.
+- **Tailscale Mesh VPN + strict UFW:** access limited to the `tailscale0` interface; public SSH blocked.
+- **Certificate-based automation:** password auth disabled on the VPS; hardened `id_ed25519` keys.
 
 ---
-*Developed as a technical showcase for advanced AI orchestration, context engineering, governed retrieval (RBAC/ACL), and quality-first RAG design.*
+*Developed as a technical showcase for MCP tool design, governed retrieval (RBAC/ACL), and pragmatic BM25 knowledge grounding.*
 
-## 5. AI Coworker (DON BSA Gates Timeline)
+## 5. Roadmap — Semantic Upgrade (Future)
+
+The current retrieval is lexical BM25. A future upgrade adds a semantic layer without changing the MCP tool surface:
+- **Embeddings:** `BAAI/bge-m3` (dense + sparse) at ingestion, stored alongside `pages`.
+- **Hybrid retrieval:** combine BM25 with dense similarity for recall on paraphrased queries.
+- **Reranking:** `BAAI/bge-reranker-v2-m3` cross-encoder to re-score candidates to a precise top-5.
+- **Delivery:** likely a small Python/HTTP embedding+rerank sidecar the TypeScript MCP calls, keeping SQLite as the metadata/ACL store or migrating vectors to a dedicated store.
+
+Until then, keyword expansion (OR-synonyms) is the recommended recall strategy for `search_company_kb`.
+
+## 6. AI Coworker (DON BSA Gates Timeline)
 
 ```mermaid
 flowchart TD
@@ -257,31 +269,28 @@ flowchart TD
     G6 -.-> C6 -.-> P6 -.-> O6
 ```
 
-## 6. Performance Evaluation: RAG + Workflow vs. Direct Search
+## 7. Performance Evaluation: RAG + Workflow vs. Direct Search
 
-The table below compares system performance when using ad-hoc direct searches (Direct Search / Single Skills) versus the integrated model combining semantic search with automated workflows (RAG + Workflow).
+Comparison of ad-hoc direct searches (Direct Search / Single Skills) versus this MCP server combining an ACL-scoped BM25 knowledge base with automated BA workflows.
 
-| Evaluation Criteria | Direct Search / Single Skills | RAG + Workflow (MCP-server) |
+| Evaluation Criteria | Direct Search / Single Skills | KB + Workflow (MCP-server) |
 | :--- | :--- | :--- |
-| **Task Completion Velocity & Context Precision** | Medium. Heavily reliant on exact keyword-matching. | **Very High.** Hybrid dense+sparse retrieval + cross-encoder rerank capture exact context. |
-| **Fuzzy Queries & Precision** | Low. Prone to failure or returning irrelevant documents without exact keywords. | **High.** Understands semantic intent and maps abstract concepts to relevant Docs. |
-| **Access Governance** | None. Users manually browse whatever they can open; easy to over-share. | **Enforced.** RBAC/ACL pre-filtering guarantees users only retrieve permitted documents. |
-| **Automation Rate** | ~30% - 40% (Humans must manually filter, chain information, and switch skills continuously). | **~85% - 90%** (Context is auto-injected from Atlassian straight into the analysis pipeline). |
-| **Development Time (Man-hours)** | Low (Uses out-of-the-box tools, no integration overhead). | **High** initially (Setup for VPS Ingestor, ChromaDB, RBAC/ACL, Tailscale). |
-| **Labor Arbitrage** | Low - Medium (Only mitigates sporadic manual lookup tasks). | **Very High** (Replaces a large portion of the documentation and synthesis workload of Junior/Mid-level BAs). |
-| **Error Rate in Execution** | High. Risk of missing documents or AI hallucinations due to broken context. | **Low.** Reranked top-5 chunks minimize noise and hallucination. |
-| **Human-in-the-loop Frequency** | Continuous (Humans must continuously prompt and review step-by-step). | **Sparse.** Intervention primarily occurs at strategic approval "Gates" (Proof Reviews). |
-| **Token Consumption** | High (Wastes tokens reloading redundant context or copy-pasting entire pages). | **Optimized** (Only retrieves and injects reranked top-5 chunks containing exactly what is needed). |
+| **Context Precision** | Medium. Manual keyword lookups across tools. | **High.** FTS5/BM25 over curated docs + OR-synonym expansion; top-5 snippets. |
+| **Fuzzy / Paraphrased Queries** | Low. Misses without exact keywords. | **Medium.** BM25 + synonym expansion helps; full semantic recall is a future upgrade (§5). |
+| **Access Governance** | None. Users browse whatever they can open. | **Enforced.** RBAC/ACL pre-filtering restricts KB results to permitted projects. |
+| **Automation Rate** | ~30% - 40% (manual filter/chain/switch). | **~85% - 90%** (context auto-injected into the analysis pipeline). |
+| **Development Time** | Low (out-of-the-box tools). | **Medium** initially (MCP server, SQLite KB, RBAC/ACL, Tailscale). |
+| **Error Rate** | High. Missing docs / broken context. | **Low.** Snippet + top-5 limit reduces noise injected into the LLM. |
+| **Human-in-the-loop** | Continuous. | **Sparse.** Intervention at approval "Gates". |
+| **Token Consumption** | High (reloads redundant context). | **Optimized** (`snippet()` + `LIMIT 5`). |
 
-### 6.1 ROI Calculation Formula (Return on Investment)
-
-The profitability of the MCP-server RAG architecture is evaluated using the following formula:
+### 7.1 ROI Calculation Formula
 
 $$ROI = \frac{\sum(T \times C) + \Delta R - (D + O)}{\sum(D + O)}$$
 
 **Where:**
 - **T**: Time saved (in hours).
 - **C**: Average labor cost ($/h).
-- **$\Delta R$**: Additional revenue generated from faster processing speeds (e.g., smoother workflows leading to quicker releases).
-- **D**: Development & Deployment costs of the MCP-server (Capital Expenditure).
-- **O**: Operational costs such as Cloud VPS servers, LLM Tokens, etc. (Operational Expenditure).
+- **$\Delta R$**: Additional revenue from faster processing.
+- **D**: Development & Deployment costs (CapEx).
+- **O**: Operational costs — VPS, LLM tokens, etc. (OpEx).
